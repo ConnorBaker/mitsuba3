@@ -166,6 +166,14 @@ static void set_variant(nb::args args) {
             nb::steal(PyImport_ReloadModule(mi_python.ptr()));
             mi_python = nb::module_::import_("mitsuba.python.ad.loaders");
             nb::steal(PyImport_ReloadModule(mi_python.ptr()));
+            mi_python = nb::module_::import_("mitsuba.python.ad.bsdfs");
+            nb::steal(PyImport_ReloadModule(mi_python.ptr()));
+            // Registered by the Blender shader-node texture plugins. Reloaded by the
+            // SUBMODULE path rather than `mitsuba.python.plugins`, whose __init__ is a
+            // bare `from .textures import *` -- reloading the parent would re-bind names
+            // without re-executing the child, so nothing would re-register.
+            mi_python = nb::module_::import_("mitsuba.python.plugins.textures");
+            nb::steal(PyImport_ReloadModule(mi_python.ptr()));
         }
 
         // Only invoke user-provided callbacks after Mitsuba plugins have reloaded,
