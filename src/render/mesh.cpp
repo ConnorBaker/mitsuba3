@@ -1615,19 +1615,22 @@ Mesh<Float, Spectrum>::compute_surface_interaction(const Ray3f &ray,
         si.uv = dr::fmadd(uv2, b2, dr::fmadd(uv1, b1, uv0 * b0));
 
         if (likely(has_flag(ray_flags, RayFlags::dPdUV))) {
-            // Fall back to an arbitrary basis for degenerate parameterizations
-            std::tie(si.dp_du, si.dp_dv) = coordinate_system(si.n);
-
             Vector2f duv0 = uv1 - uv0,
                      duv1 = uv2 - uv0;
 
-            Float det     = dr::fmsub(duv0.x(), duv1.y(), duv0.y() * duv1.x()),
-                  inv_det = dr::rcp(det);
+            Float det = dr::fmsub(duv0.x(), duv1.y(), duv0.y() * duv1.x());
 
-            Mask valid = (det != 0.f);
+            // Faces that occupy no UV area have no parameterization to invert.
+            // Substituting the identity map keeps the barycentric one.
+            Mask degenerate = det == 0.f;
+            duv0 = dr::select(degenerate, Vector2f(1.f, 0.f), duv0);
+            duv1 = dr::select(degenerate, Vector2f(0.f, 1.f), duv1);
+            det  = dr::select(degenerate, 1.f, det);
 
-            si.dp_du[valid] = dr::fmsub( duv1.y(), dp0, duv0.y() * dp1) * inv_det;
-            si.dp_dv[valid] = dr::fnmadd(duv1.x(), dp0, duv0.x() * dp1) * inv_det;
+            Float inv_det = dr::rcp(det);
+
+            si.dp_du = dr::fmsub( duv1.y(), dp0, duv0.y() * dp1) * inv_det;
+            si.dp_dv = dr::fnmadd(duv1.x(), dp0, duv0.x() * dp1) * inv_det;
         }
     }
 

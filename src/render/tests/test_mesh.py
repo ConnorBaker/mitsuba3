@@ -1467,3 +1467,28 @@ def test39_custom_vertex_normals(variants_vec_rgb):
 
     # The custom vertex normals should not have been modified.
     assert dr.allclose(params['vertex_normals'], normals)
+
+
+def test40_dpduv_degenerate_uv_and_no_uv(variants_all_rgb):
+    """Adapted from upstream 886077b6 + b4b8378b (test08_degenerate_fallback in
+    the post-rewrite test_mesh_shading.py, which does not exist at v3.9.0):
+    without texture coordinates si.uv holds barycentrics and dp_du/dp_dv are the
+    triangle edge vectors; a face whose three vertices share one UV value (zero
+    UV area) keeps that same barycentric parameterization instead of inverting a
+    singular map."""
+    for with_uv in (False, True):
+        m = mi.Mesh("degen_uv", 3, 1, has_vertex_texcoords=with_uv)
+        params = mi.traverse(m)
+        params['vertex_positions'] = [0, 0, 0, 1, 0, 0, 1, 1, 0]
+        params['faces'] = [0, 1, 2]
+        if with_uv:
+            params['vertex_texcoords'] = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+        params.update()
+        scene = mi.load_dict({'type': 'scene', 'm': m})
+        ray = mi.Ray3f(mi.Vector3f(0.75, 0.25, -10.0), mi.Vector3f(0.0, 0.0, 1.0))
+        si = scene.ray_intersect(ray)
+        assert dr.all(si.is_valid())
+        assert dr.allclose(si.dp_du, [1, 0, 0])
+        assert dr.allclose(si.dp_dv, [1, 1, 0])
+        if with_uv:
+            assert dr.allclose(si.uv, [0.5, 0.5])
