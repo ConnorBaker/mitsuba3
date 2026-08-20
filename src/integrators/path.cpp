@@ -140,6 +140,23 @@ public:
 
            Each is -1 by default, meaning unlimited, so a scene that names none of them is
            rendered exactly as before. */
+        /* Cycles' per-sample radiance clamp; see \ref clamp_light. Blender's UI values,
+           0 meaning "off", with Cycles' own factor of three folded in here so that the
+           number written in the .blend is the number written here. Both default to 0 so
+           that a scene which does not ask for the clamp gets an unbiased estimator --
+           Blender's own default for the indirect side is 10.0, not 0, and it is the
+           EXPORTER's job to carry that across rather than this plugin's job to assume it. */
+        ScalarFloat clamp_direct   = props.get<ScalarFloat>("clamp_direct", 0.f);
+        ScalarFloat clamp_indirect = props.get<ScalarFloat>("clamp_indirect", 0.f);
+        if (clamp_direct < 0.f || clamp_indirect < 0.f)
+            Throw("PathIntegrator: clamp_direct and clamp_indirect must be non-negative "
+                  "(0 disables the clamp); got %f and %f", clamp_direct, clamp_indirect);
+        m_clamp_direct   = clamp_direct   == 0.f ? dr::Infinity<ScalarFloat>
+                                                 : clamp_direct * 3.f;
+        m_clamp_indirect = clamp_indirect == 0.f ? dr::Infinity<ScalarFloat>
+                                                 : clamp_indirect * 3.f;
+        m_clamp_enabled  = clamp_direct != 0.f || clamp_indirect != 0.f;
+
         m_diffuse_max_depth      = props.get<int>("diffuse_max_depth", -1);
         m_glossy_max_depth       = props.get<int>("glossy_max_depth", -1);
         m_transmission_max_depth = props.get<int>("transmission_max_depth", -1);
@@ -299,11 +316,18 @@ public:
                 // Compute MIS weight for emitter sample from previous bounce
                 Float mis_bsdf = mis_weight(ls.prev_bsdf_pdf, em_pdf);
 
-                // Accumulate, being careful with polarization (see spec_fma)
-                ls.result = spec_fma(
-                    ls.throughput,
-                    ds.emitter->eval(si, ls.prev_bsdf_pdf > 0.f) * mis_bsdf,
-                    ls.result);
+                /* Accumulate, being careful with polarization (see spec_fma).
+
+                   The clamp's bounce index for emission found by a BSDF sample is
+                   Cycles' `path.bounce - 1` (`film_write_surface_emission`). `ls.depth`
+                   is that `bounce` -- the number of scattering events already performed
+                   -- so "indirect" is `depth - 1 > 0`, i.e. `depth >= 2`. Written as a
+                   comparison rather than a subtraction because `depth` is unsigned and
+                   the direct case is exactly the one that would underflow. */
+                Spectrum emitted = clamp_light(
+                    ls.throughput * ds.emitter->eval(si, ls.prev_bsdf_pdf > 0.f) * mis_bsdf,
+                    ls.depth >= 2);
+                ls.result += emitted;
             }
 
             // Continue tracing the path at this point?
@@ -373,9 +397,17 @@ public:
                 Float mis_em =
                     dr::select(ds.delta, 1.f, mis_weight(ds.pdf, bsdf_pdf));
 
-                // Accumulate, being careful with polarization (see spec_fma)
-                ls.result[active_em] = spec_fma(
-                    ls.throughput, bsdf_val * em_weight * mis_em, ls.result);
+                /* Accumulate, being careful with polarization (see spec_fma).
+
+                   For a light sampled directly, Cycles clamps on `shadow_path.bounce`
+                   (`film_write_direct_light`), which is `path.bounce` at the moment the
+                   shadow ray is cast -- `ls.depth` here. So "indirect" is `depth >= 1`,
+                   one lower than the emission site above. The two agree physically: NEE
+                   at the first hit and BSDF-sampled emission after one bounce describe
+                   the same single-scattering path, and both are classified as direct. */
+                Spectrum sampled = clamp_light(
+                    ls.throughput * bsdf_val * em_weight * mis_em, ls.depth >= 1);
+                ls.result[active_em] = ls.result + sampled;
             }
 
             // ---------------------- BSDF sampling ----------------------
@@ -559,6 +591,9 @@ public:
     bool m_separate_null_budget = false;
 
     /// Blender's remaining per-lobe budgets; -1 each disables that one
+    ScalarFloat m_clamp_direct   = dr::Infinity<ScalarFloat>;
+    ScalarFloat m_clamp_indirect = dr::Infinity<ScalarFloat>;
+    bool m_clamp_enabled = false;
     int m_diffuse_max_depth = -1;
     int m_glossy_max_depth = -1;
     int m_transmission_max_depth = -1;
@@ -571,6 +606,51 @@ public:
         pdf_b *= pdf_b;
         Float w = pdf_a / (pdf_a + pdf_b);
         return dr::detach<true>(dr::select(dr::isfinite(w), w, 0.f));
+    }
+
+    /**
+     * \brief Cycles' per-sample radiance clamp (\c film_clamp_light).
+     *
+     * Blender ships this ON: \c sample_clamp_indirect defaults to 10.0, so an importer
+     * that ignores it is not comparing against the estimator Cycles actually ran. It is
+     * deliberately biased -- it exists to kill fireflies -- and the bias is not small
+     * wherever a path can carry a very large contribution.
+     *
+     * Transcribed from \c intern/cycles/kernel/film/light_passes.h:
+     *
+     * \code
+     *   const float limit = (bounce > 0) ? sample_clamp_indirect : sample_clamp_direct;
+     *   const float sum = reduce_add(fabs(*L));
+     *   if (sum > limit) { *L *= limit / sum; }
+     * \endcode
+     *
+     * Three details are easy to get wrong and are all load-bearing. The test is on the
+     * L1 SUM of the channels, not on any single channel and not on luminance. The whole
+     * spectrum is then scaled by one common factor, so clamping shifts brightness but
+     * never hue. And \c scene/integrator.cpp stores the UI value multiplied by three
+     * (\c sample_clamp_direct * 3.0f), with zero mapped to \c FLT_MAX rather than to a
+     * limit of zero -- which is why 0 means "off" instead of "block everything". The
+     * factor of three is applied here so that this plugin's parameters carry the same
+     * numbers as Blender's UI, and it is Cycles' RGB convention: in a spectral variant
+     * the sum runs over wavelengths and the correspondence is no longer exact.
+     *
+     * The scale is computed from the unpolarized intensity and then applied to the full
+     * Spectrum, so a Mueller matrix is attenuated rather than reinterpreted.
+     */
+    Spectrum clamp_light(const Spectrum &L, const Mask &indirect) const {
+        if (!m_clamp_enabled)
+            return L;
+
+        UnpolarizedSpectrum us = unpolarized_spectrum(L);
+        Float sum = 0.f;
+        for (size_t i = 0; i < dr::size_v<UnpolarizedSpectrum>; ++i)
+            sum += dr::abs(us[i]);
+
+        Float limit = dr::select(indirect, Float(m_clamp_indirect), Float(m_clamp_direct));
+        // `sum > limit` is false when limit is infinite, so a disabled side is a no-op
+        // without a second branch; and sum == 0 cannot reach the division.
+        Float scale = dr::select(sum > limit, limit / sum, 1.f);
+        return L * scale;
     }
 
     /**
