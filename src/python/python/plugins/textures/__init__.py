@@ -20,6 +20,7 @@ if mi.variant() is not None and not mi.variant().startswith('scalar'):
         'mesh_attribute_adapter',
         'mix_color',
         'noise',
+        'noise_texture',
         'normalmap',
         'rgb_to_bw',
         'separate_rgb',

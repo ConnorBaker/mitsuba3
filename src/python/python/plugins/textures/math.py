@@ -3,22 +3,14 @@ from __future__ import annotations # Delayed parsing of type annotations
 import drjit as dr
 import mitsuba as mi
 
-def smooth_min(a, b, c):
-    h = dr.maximum(c - dr.abs(a - b), 0.0) / c
-    out = dr.minimum(a, b) - h * h * h * c * (1.0 / 6.0)
-    out[c == 0.0] = dr.minimum(a, b)
-    return out
-
-def fract(x):
-    return x - dr.floor(x)
-
-def safe_divide(a, b):
-    return dr.select(b != 0.0, a / b, 0.0)
-
-def wrap(a, b, c):
-    r = b - c
-    s = dr.select(a != b, dr.floor((a - c) / r), 1.0)
-    return dr.select(r != 0.0, a - r * s, c)
+# HSR: every one of these used to be spelled the obvious way and disagreed with Cycles on
+# inputs a texture reaches constantly. They now come from `blender_math`, which transcribes
+# Cycles' own `safe_*` / `compatible_*` helpers, so the scalar Math node and the Vector Math
+# node cannot drift apart.
+from .blender_math import (
+    blender_round, blender_trunc, compare, compatible_atan2, compatible_sign,
+    fract, inverse_sqrt, pingpong, safe_acos, safe_asin, safe_divide, safe_floored_modulo,
+    safe_log, safe_modulo, safe_pow, safe_sqrt, smooth_min, wrap)
 
 # Supported math operators
 # See blender implementation: https://github.com/blender/blender/blob/594f47ecd2d5367ca936cf6fc6ec8168c2b360d0/source/blender/gpu/shaders/material/gpu_shader_material_math.glsl#L203
@@ -28,40 +20,46 @@ OPERATORS = {
     'MULTIPLY':       (lambda a, b, c: a * b),
     'DIVIDE':         (lambda a, b, c: safe_divide(a, b)),  # HSR: Blender returns 0 on b == 0
     'MULTIPLY_ADD':   (lambda a, b, c: a * b + c),
-    'POWER':          (lambda a, b, c: dr.power(a, b)),
-    'LOGARITHM':      (lambda a, b, c: dr.log(a)/ dr.log(b)),
-    'SQRT':           (lambda a, b, c: dr.sqrt(a)),
-    'INVERSE_SQRT':   (lambda a, b, c: dr.rcp(dr.sqrt(a))),
+    'POWER':          (lambda a, b, c: safe_pow(a, b)),
+    'LOGARITHM':      (lambda a, b, c: safe_log(a, b)),
+    'SQRT':           (lambda a, b, c: safe_sqrt(a)),
+    'INVERSE_SQRT':   (lambda a, b, c: inverse_sqrt(a)),
     'ABSOLUTE':       (lambda a, b, c: dr.abs(a)),
     'EXPONENT':       (lambda a, b, c: dr.exp(a)),
     'MINIMUM':        (lambda a, b, c: dr.minimum(a, b)),
     'MAXIMUM':        (lambda a, b, c: dr.maximum(a, b)),
     'LESS_THAN':      (lambda a, b, c: dr.select(a < b, 1.0, 0.0)),
     'GREATER_THAN':   (lambda a, b, c: dr.select(a > b, 1.0, 0.0)),
-    'SIGN':           (lambda a, b, c: dr.select(a >= 0.0, 1.0, 0.0)),
-    'COMPARE':        (lambda a, b, c: dr.select(dr.abs(a - b) <= dr.maximum(c, 1e-5), 1.0, 0.0)),
+    # HSR: was `a >= 0 ? 1 : 0` -- so every NEGATIVE input returned 0 where Blender
+    # returns -1. Rendered: Cycles -1, Mitsuba 0, over half the plane.
+    'SIGN':           (lambda a, b, c: compatible_sign(a)),
+    # HSR: the floor is FLT_EPSILON, not 1e-5 -- two orders of magnitude apart.
+    'COMPARE':        (lambda a, b, c: compare(a, b, c)),
     'SMOOTH_MIN':     (lambda a, b, c: smooth_min(a, b, c)),
     'SMOOTH_MAX':     (lambda a, b, c: -smooth_min(-a, -b, c)),
-    'ROUND':          (lambda a, b, c: dr.round(a)),
+    # HSR: `dr.round` is round-half-to-EVEN; Blender's is `floor(a + 0.5)`.
+    'ROUND':          (lambda a, b, c: blender_round(a)),
     'FLOOR':          (lambda a, b, c: dr.floor(a)),
     'CEIL':           (lambda a, b, c: dr.ceil(a)),
-    'TRUNC':          (lambda a, b, c: dr.trunc(a)),
+    'TRUNC':          (lambda a, b, c: blender_trunc(a)),
     # HSR: Blender's enum identifier is 'FRACT'. 'FRACTION' was never a name Blender
     # emits, so a Fract node raised KeyError mid-render; kept as an alias.
     'FRACT':          (lambda a, b, c: fract(a)),
     'FRACTION':       (lambda a, b, c: fract(a)),
-    'MODULO':         (lambda a, b, c: dr.select(b != 0.0, a - dr.trunc(a / b) * b, 0.0)),
-    'FLOORED_MODULO': (lambda a, b, c: dr.select(b != 0.0, a - dr.floor(a / b) * b, 0.0)),
+    'MODULO':         (lambda a, b, c: safe_modulo(a, b)),
+    'FLOORED_MODULO': (lambda a, b, c: safe_floored_modulo(a, b)),
     'WRAP':           (lambda a, b, c: wrap(a, b, c)),
     'SNAP':           (lambda a, b, c: dr.floor(safe_divide(a, b)) * b),
-    'PINGPONG':       (lambda a, b, c: dr.select(b != 0.0, dr.abs(fract((a - b) / (b * 2.0)) * b * 2.0 - b), 0.0)),
+    'PINGPONG':       (lambda a, b, c: pingpong(a, b)),
     'SINE':           (lambda a, b, c: dr.sin(a)),
     'COSINE':         (lambda a, b, c: dr.cos(a)),
     'TANGENT':        (lambda a, b, c: dr.tan(a)),
-    'ARCSINE':        (lambda a, b, c: dr.select(a <= 1.0 & a >= -1.0, dr.asin(a), 0.0)),
-    'ARCCOSINE':      (lambda a, b, c: dr.select(a <= 1.0 & a >= -1.0, dr.acos(a), 0.0)),
+    # HSR: was `dr.select(a <= 1.0 & a >= -1.0, ...)`, which Python parses as
+    # `a <= (1.0 & a) >= -1.0` -- a bitwise AND against a float. Blender CLAMPS.
+    'ARCSINE':        (lambda a, b, c: safe_asin(a)),
+    'ARCCOSINE':      (lambda a, b, c: safe_acos(a)),
     'ARCTANGENT':     (lambda a, b, c: dr.atan(a)),
-    'ARCTAN2':        (lambda a, b, c: dr.atan2(a, b)),
+    'ARCTAN2':        (lambda a, b, c: compatible_atan2(a, b)),
     'SINH':           (lambda a, b, c: dr.sinh(a)),
     'COSH':           (lambda a, b, c: dr.cosh(a)),
     'TANH':           (lambda a, b, c: dr.tanh(a)),
