@@ -424,6 +424,12 @@ public:
             dr::masked(bs.sampled_type, sample_spec_reflect) =
                     +BSDFFlags::GlossyReflection;
 
+            /* Widening roughness for the ray differential (Cycles'
+               `bsdf_get_specular_roughness_squared`). The diffuse branch below
+               deliberately reports nothing: a non-delta lobe that reports nothing
+               reads as fully rough, which is Cycles' own value for it. */
+            dr::masked(bs.sampled_roughness_squared, sample_spec_reflect) = ax * ay;
+
             /* Filter the cases where macro and micro surfaces do not agree
              on the same side and reflection is not successful*/
             Mask reflect = cos_theta_i * Frame3f::cos_theta(wo) > 0.0f;
@@ -440,6 +446,7 @@ public:
             dr::masked(bs.sampled_component, sample_spec_trans) = 2;
             dr::masked(bs.sampled_type, sample_spec_trans) =
                     +BSDFFlags::GlossyTransmission;
+            dr::masked(bs.sampled_roughness_squared, sample_spec_trans) = ax * ay;
             dr::masked(bs.eta, sample_spec_trans) = eta_it;
 
             /* Filter the cases where macro and micro surfaces do not agree
@@ -463,6 +470,9 @@ public:
             dr::masked(bs.sampled_component, sample_clearcoat) = 1;
             dr::masked(bs.sampled_type, sample_clearcoat) =
                     +BSDFFlags::GlossyReflection;
+            /* GTR1 is isotropic and its alpha is the lerp above. */
+            dr::masked(bs.sampled_roughness_squared, sample_clearcoat) =
+                    dr::square(dr::lerp(0.1f, 0.001f, clearcoat_gloss));
 
             /* Filter the cases where macro and microfacets do not agree on
              the same side and reflection is not successful. */

@@ -206,6 +206,48 @@ template <typename Float, typename Spectrum> struct BSDFSample3 {
     /// Stores the component index that was sampled by \ref BSDF::sample()
     UInt32 sampled_component;
 
+    /**
+     * \brief Squared microfacet roughness of the lobe that was sampled, or
+     *        zero when the BSDF did not report one.
+     *
+     * This exists so that an integrator can widen a ray differential after a
+     * non-specular bounce, which is what makes a texture footprint meaningful
+     * past the camera hit. Cycles derives the same quantity in
+     * \c bsdf_get_specular_roughness_squared
+     * (\c intern/cycles/kernel/closure/bsdf.h) and feeds it to
+     * \c bsdf_widen_dD, whose rule is
+     * \c dD' = max(dD, sqrt(avg_roughness_squared)).
+     *
+     * Cycles has three cases and only the middle one needs a plugin's
+     * cooperation:
+     *
+     * <ul>
+     * <li>a singular closure contributes 0. A reader gets this from
+     *     \c sampled_type -- a delta lobe is already flagged there -- so a
+     *     specular BSDF need not touch this field.</li>
+     * <li>a microfacet closure contributes \c alpha_x * alpha_y. Nothing else
+     *     knows that number, so a microfacet BSDF must report it here.</li>
+     * <li>anything else contributes 1, which is also what a reader should
+     *     assume for a non-delta lobe that reports nothing. That is Cycles'
+     *     own \c else branch, not a fallback invented here.</li>
+     * </ul>
+     *
+     * ZERO IS THE "NOT REPORTED" SENTINEL, deliberately, and a negative one
+     * would be a bug: plugins build their sample both by
+     * \c dr::zeros<BSDFSample3f>() and through the constructor below, so any
+     * sentinel that zero-initialization cannot produce would be reachable
+     * from only one of the two paths and would mean different things
+     * depending on which a plugin happened to use. Zero is safe from both,
+     * and it does not collide with a real value because a microfacet lobe
+     * whose alpha is genuinely zero is a delta lobe and is flagged as one.
+     *
+     * The one consequence worth stating plainly: a MICROFACET BSDF that
+     * leaves this unset is read as fully rough, which over-widens the
+     * differential for a near-mirror lobe. It is not silently wrong for
+     * anything else.
+     */
+    Float sampled_roughness_squared;
+
     //! @}
     // =============================================================
 
@@ -228,13 +270,15 @@ template <typename Float, typename Spectrum> struct BSDFSample3 {
      */
     BSDFSample3(const Vector3f &wo)
         : wo(wo), pdf(0.f), eta(1.f), sampled_type(0),
-          sampled_component(uint32_t(-1)) { }
+          sampled_component(uint32_t(-1)),
+          sampled_roughness_squared(0.f) { }
 
 
     //! @}
     // =============================================================
 
-    DRJIT_STRUCT(BSDFSample3, wo, pdf, eta, sampled_type, sampled_component);
+    DRJIT_STRUCT(BSDFSample3, wo, pdf, eta, sampled_type, sampled_component,
+                 sampled_roughness_squared);
 };
 
 
@@ -634,6 +678,7 @@ std::ostream &operator<<(std::ostream &os, const BSDFSample3<Float, Spectrum>& b
         << "  eta = " << bs.eta << "," << std::endl
         << "  sampled_type = " << "TODO" /*type_mask_to_string(bs.sampled_type)*/ << "," << std::endl
         << "  sampled_component = " << bs.sampled_component << std::endl
+            << "  sampled_roughness_squared = " << bs.sampled_roughness_squared << std::endl
         << "]";
     return os;
 }

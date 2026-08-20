@@ -312,6 +312,12 @@ public:
                                       UInt32(+BSDFFlags::GlossyReflection),
                                       UInt32(+BSDFFlags::GlossyTransmission));
 
+        /* Report the lobe's squared roughness so an integrator can widen the ray
+           differential after this bounce (Cycles'
+           `bsdf_get_specular_roughness_squared` -> `bsdf_widen_dD`). Without it a
+           texture footprint is meaningless past the camera hit. */
+        bs.sampled_roughness_squared = distr.alpha_u() * distr.alpha_v();
+
         Float dwh_dwo = 0.f;
 
         // Reflection sampling

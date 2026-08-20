@@ -297,6 +297,13 @@ public:
             dr::masked(bs.wo, sample_specular) = reflect(si.wi, m);
             dr::masked(bs.sampled_component, sample_specular) = 0;
             dr::masked(bs.sampled_type, sample_specular) = +BSDFFlags::GlossyReflection;
+
+            /* Widening roughness for the ray differential (Cycles'
+               `bsdf_get_specular_roughness_squared`). The diffuse branch below
+               deliberately reports nothing: a non-delta lobe that reports nothing
+               reads as fully rough, which is exactly Cycles' value for it. */
+            dr::masked(bs.sampled_roughness_squared, sample_specular) =
+                distr.alpha_u() * distr.alpha_v();
         }
 
         if (dr::any_or<true>(sample_diffuse)) {

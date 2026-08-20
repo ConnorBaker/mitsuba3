@@ -960,6 +960,7 @@ static const char *__doc_mitsuba_BSDFSample3_operator_assign_2 = R"doc(//! @})do
 static const char *__doc_mitsuba_BSDFSample3_pdf = R"doc(Probability density at the sample)doc";
 
 static const char *__doc_mitsuba_BSDFSample3_sampled_component = R"doc(Stores the component index that was sampled by BSDF::sample())doc";
+static const char *__doc_mitsuba_BSDFSample3_sampled_roughness_squared = R"doc(Squared microfacet roughness of the lobe that was sampled, or zero when the BSDF did not report one. Zero is the "not reported" sentinel; a delta lobe is identified from sampled_type, and a non-delta lobe that reports nothing is read as fully rough (1), which is what Cycles does for a non-microfacet closure.)doc";
 
 static const char *__doc_mitsuba_BSDFSample3_sampled_type = R"doc(Stores the component type that was sampled by BSDF::sample())doc";
 

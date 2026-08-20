@@ -255,6 +255,12 @@ public:
         bs.sampled_component = 0;
         bs.sampled_type = +BSDFFlags::GlossyReflection;
 
+        /* Report the lobe's squared roughness so an integrator can widen the ray
+           differential after this bounce (Cycles'
+           `bsdf_get_specular_roughness_squared` -> `bsdf_widen_dD`). Without it a
+           texture footprint is meaningless past the camera hit. */
+        bs.sampled_roughness_squared = distr.alpha_u() * distr.alpha_v();
+
         // Ensure that this is a valid sample
         active &= (bs.pdf != 0.f) && Frame3f::cos_theta(bs.wo) > 0.f;
 
