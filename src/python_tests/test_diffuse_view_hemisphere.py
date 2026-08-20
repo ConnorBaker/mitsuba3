@@ -316,3 +316,77 @@ def test06_oren_nayar_matches_the_kernel_below_the_horizon():
         "OrenNayarLobe disagrees with `bsdf_oren_nayar_get_intensity` by %.3e over %d cases "
         "(%d of them with the view below the closure normal). An unclamped `cos_theta_i` "
         "reaches `oren_nayar_G` and the `t` denominator." % (worst, n_cases, n_below))
+
+
+def _glass(two_sided=False):
+    return mi.load_dict({
+        'type': 'blender_principled',
+        'two_sided': two_sided, 'multiscatter': False,
+        'base_color': {'type': 'rgb', 'value': [1.0, 1.0, 1.0]},
+        'roughness': 0.3, 'metallic': 0.0, 'eta': 1.45, 'alpha': 1.0,
+        'diffuse_roughness': 0.0,
+        'spec_ior_level': 0.5, 'spec_tint': {'type': 'rgb', 'value': [1, 1, 1]},
+        'anisotropic': 0.0, 'anisotropic_rot': 0.0,
+        'transmission': 1.0,
+        'clearcoat': 0.0, 'clearcoat_roughness': 0.03, 'clearcoat_ior': 1.5,
+        'clearcoat_tint': {'type': 'rgb', 'value': [1, 1, 1]},
+        'sheen': 0.0, 'sheen_roughness': 0.5,
+        'sheen_tint': {'type': 'rgb', 'value': [1, 1, 1]},
+        'bump_map_correction': False,
+    })
+
+
+def test07_an_interior_glass_hit_still_transmits():
+    """REGRESSION GUARD for the shape of the microfacet view test.
+
+    `bsdf_microfacet_eval` opens with `cos_NI <= 0 -> zero_spectrum()` and that covers the
+    glass closures too, so the obvious transcription of it is `cos_theta(wi) > 0`. That
+    spelling is WRONG, and wrong in a way this file's other cases cannot see: Cycles only
+    gets away with the bare test because `shader_setup_from_ray` FLIPS `sd->N` and `sd->Ng`
+    on a backfacing hit, so `cos_NI > 0` there describes the side the ray arrived from.
+    Mitsuba keeps the un-flipped frame for a one-sided BSDF, so a literal transcription
+    kills every ray already inside a glass object -- a far larger regression than the
+    normal-map defect the test suite is about, and one with no normal map anywhere in it.
+
+    The shipped form is the same-sign test, `cos_theta(wi) * cos_theta(si.wi) > 0`. Here
+    there is no normal map at all, so the two cosines are the same number and the test is
+    inert -- which is the point: the guard must survive the case it was nearly broken by.
+    """
+    mi.set_variant(_variant())
+    glass = _glass(two_sided=False)
+    ctx = mi.BSDFContext()
+    n = 128
+    rng = np.random.default_rng(1)
+
+    # An INTERIOR hit: the view is below the geometric normal, which is how a ray inside a
+    # closed dielectric arrives at the far wall.
+    inside = _si(np.array([0.3, 0.0, -np.sqrt(1 - 0.09)]), n)
+    outside = _si(np.array([0.3, 0.0, np.sqrt(1 - 0.09)]), n)
+
+    s1 = mi.Float(rng.random(n).astype(np.float32))
+    s2 = mi.Point2f(rng.random(n).astype(np.float32), rng.random(n).astype(np.float32))
+
+    res = {}
+    for label, si in (("inside", inside), ("outside", outside)):
+        bs, weight = glass.sample(ctx, si, s1, s2, mi.Bool(True))
+        pdf = np.array(bs.pdf)
+        w = np.array(weight[0])
+        res[label] = (pdf, w)
+        assert np.isfinite(w).all(), "%s: non-finite sampling weight" % label
+
+    assert (res["outside"][0] > 0).mean() > 0.5, (
+        "the control arm is broken: only %.1f%% of samples from OUTSIDE the dielectric have "
+        "a positive pdf, so a dead INSIDE arm would prove nothing"
+        % (100.0 * (res["outside"][0] > 0).mean()))
+    assert (res["inside"][0] > 0).mean() > 0.5, (
+        "only %.1f%% of samples taken from INSIDE the dielectric have a positive pdf. A "
+        "bare `cos_theta(wi) > 0` microfacet view test returns 0%% here." 
+        % (100.0 * (res["inside"][0] > 0).mean()))
+
+    # And the lobe reached must actually be a transmissive one at least some of the time --
+    # a glass that only ever reflects from the inside is still broken.
+    bs, _ = glass.sample(ctx, inside, s1, s2, mi.Bool(True))
+    got_transmission = (np.array(bs.sampled_type) & int(mi.BSDFFlags.GlossyTransmission)) != 0
+    assert got_transmission.mean() > 0.05, (
+        "no sample from inside the dielectric was a transmission (%.1f%%); the interior is "
+        "reflecting only" % (100.0 * got_transmission.mean()))
