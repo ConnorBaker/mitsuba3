@@ -71,7 +71,12 @@ class BlenderPrincipledBSDF(mi.BSDF):
         self.has_sheen = is_active(props, "sheen")
         self.sheen = props.get_texture("sheen", 0.0)
         self.has_sheen_tint = is_active(props, "sheen_tint")
-        self.sheen_tint = props.get_texture("sheen_tint", 0.0)
+        # HSR: Blender's `Sheen Tint` default is WHITE, and the neutral value of a TINT is 1,
+        # not 0. Defaulting it to 0 makes an absent property delete the lobe the caller just
+        # asked for by setting `sheen` -- a silent fallback, and the same trap `spec_tint`
+        # carries. The exporter always emits this property, so nothing that round-trips
+        # through Blender is affected; what is affected is a hand-written dict.
+        self.sheen_tint = props.get_texture("sheen_tint", 1.0)
         self.sheen_roughness = props.get_texture("sheen_roughness", 0.5)
         self.has_spec_tint = is_active(props, "spec_tint")
         self.spec_tint = props.get_texture("spec_tint", 0.0)
@@ -216,7 +221,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
         attr.sheen_tint = (
             self.sheen_tint.eval(si, active)
             if self.has_sheen_tint
-            else mi.UnpolarizedSpectrum(0.0)
+            else mi.UnpolarizedSpectrum(1.0)  # HSR: neutral tint is 1; see __init__
         )
         attr.sheen_roughness = (
             self.sheen_roughness.eval_1(si, active) if self.has_sheen else mi.Float(0.0)
@@ -285,7 +290,15 @@ class BlenderPrincipledBSDF(mi.BSDF):
         """
         weights = dotdict()
         weights.diffuse = mi.UnpolarizedSpectrum(attr.diffuse)
-        weights.sheen = mi.UnpolarizedSpectrum(attr.sheen)
+        # HSR: the tint belongs on the WEIGHT, not on the albedo estimate. It used to be
+        # applied to `albedos.sheen` alone -- so it governed the layering budget and, through
+        # it, the lobe's sampling weight, while `_eval_pdf_impl` added the sheen value
+        # UNTINTED. Budget and value disagreed by exactly the tint: with the tint at its old
+        # black default the lobe was never sampled (a black base under a sheen of 1 rendered
+        # 0.000000 against Cycles' 0.067688) yet still contributed to `eval`, and with a
+        # white tint the furnace read 1.006160 -- energy from nothing. On the weight it is
+        # counted once, in both paths.
+        weights.sheen = mi.UnpolarizedSpectrum(attr.sheen) * attr.sheen_tint
         weights.clearcoat = mi.UnpolarizedSpectrum(attr.clearcoat)
         weights.metallic = mi.UnpolarizedSpectrum(attr.metallic)
         weights.specular = mi.UnpolarizedSpectrum(1.0)
@@ -339,17 +352,11 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         # Sheen lobe
         if self.has_sheen:
-            albedos.sheen = (
-                microfacet_estimate_albedo(
-                    MicrofacetFresnel.NONE,
-                    sh_wi,
-                    roughness=attr.sheen_roughness,
-                    r0=0.0,
-                    eta=attr.eta,
-                    reflection=True,
-                    transmission=False,
-                )
-                * attr.sheen_tint
+            # HSR: `microfacet_estimate_albedo(NONE, r0=0)` returns a flat 1.0, which is not
+            # this lobe's albedo -- the real one peaks at 0.087214 and falls to 0 at normal
+            # incidence. Budgeting 1.0 for it made an ACTIVE sheen tint delete the substrate.
+            albedos.sheen = mi.UnpolarizedSpectrum(
+                sheen_directional_albedo(mi.Frame3f.cos_theta(sh_wi))
             )
             attenuation = layering(albedos.sheen, weights.sheen, attenuation)
 
@@ -442,6 +449,16 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 transmission=False,
             )
             albedos.specular[attr.spec_ior_level == 0.0] = 0.0
+            # HSR: THE LAYERING BUDGET HAS TO MATCH WHAT THE LOBE DELIVERS.
+            # `microfacet_estimate_albedo` returns the roughness-aware FRESNEL reflectance,
+            # and `layering` hands the diffuse lobe below only `1 - that`. But the specular
+            # lobe is single-scattering: it delivers reflectance * E(roughness, mu), and the
+            # remaining reflectance * (1 - E) is subtracted from the substrate and then
+            # reflected by nobody. White base, roughness 0.8, constant environment of
+            # radiance 1: 0.983106 where Cycles reads 0.999658 and the analytic answer is 1.
+            albedos.specular *= ggx_directional_albedo(
+                attr.roughness, mi.Frame3f.cos_theta(sh_wi)
+            )
             attenuation = layering(albedos.specular, weights.specular, attenuation)
 
         # Diffuse lobe

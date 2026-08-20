@@ -243,6 +243,56 @@ def microfacet_estimate_albedo(
 # ------------------------------------------------------------------------------
 
 
+def sheen_directional_albedo(cos_theta: mi.Float) -> mi.Float:
+    """
+    Directional albedo of `SheenLobe`, i.e. the integral of its `eval` over the hemisphere.
+
+    Needed because the layering code used to budget for this lobe with
+    `microfacet_estimate_albedo(NONE, r0=0)`, which returns a flat 1.0 -- between 15x and
+    1300x the truth, since the real albedo runs from 0.087214 at grazing down to ~0 at normal
+    incidence. A layer that claims all of the incident energy and then delivers a fraction of
+    a percent of it does not tint the surface below, it DELETES it. Measured on a white base
+    at roughness 0.8 in a constant environment of radiance 1, with `sheen_tint` present and
+    white -- which is what `mitsuba-blender`'s exporter writes for Blender's default:
+
+        sheen weight     Cycles      this plugin
+            0.2         0.999664      0.887187     (-11.2515%)
+            1.0         0.999690      0.005587     (-99.4411%)
+
+    The lobe accepts a `roughness` argument and never reads it, so this is a function of
+    cos_theta alone -- checked across a 64-point grid, where E(roughness=0) and E(roughness=1)
+    agree to 0.000e+00 exactly. That is why a cubic suffices and no new table is needed: it is
+    a least-squares fit in (1 - mu) to a 2^23-sample hemisphere integration of the lobe, with
+    no constant term because E(mu = 1) is 0 analytically (a normal-incidence retro direction
+    gives cos_d = 1, where the Schlick weight vanishes). Max absolute error over the grid is
+    3.561e-04, 0.408% of the peak.
+
+    NOTE this fixes the plugin's ENERGY BOOKKEEPING, not its agreement with Cycles' sheen
+    MODEL. `SheenLobe` is the Disney/Blender-3.x Schlick-weight sheen; Blender 4.x uses
+    Zeltner et al.'s linearly-transformed-cosine microfibre sheen, which is roughness-
+    dependent and carries roughly 5x this lobe's albedo. That gap is a separate, larger piece
+    of work and is deliberately NOT claimed to be closed here.
+    """
+    t = 1.0 - dr.clip(dr.abs(cos_theta), 0.0, 1.0)
+    return dr.maximum(
+        t * (0.013357388 + t * (-0.004919108 + t * 0.079626067)), 0.0
+    )
+
+
+def ggx_directional_albedo(roughness: mi.Float, cos_theta: mi.Float) -> mi.Float:
+    """
+    Directional albedo E(roughness, mu) of a GGX lobe with the Fresnel term set to 1 --
+    the FRACTION of the incident energy a SINGLE-SCATTERING lobe actually delivers.
+
+    This is `ggx_E`, the same table `ggx_energy_compensation` divides by, exposed on its own
+    because one caller needs the fraction rather than its reciprocal: a layered lobe has to
+    subtract from the layer below what it DELIVERS, not what its Fresnel term promises.
+    """
+    return fetch_table("ggx_E").eval(
+        [dr.clip(roughness, 1e-4, 1.0), dr.clip(dr.abs(cos_theta), 1e-4, 1.0)]
+    )[0]
+
+
 def ggx_energy_compensation(
     roughness: mi.Float,
     cos_theta: mi.Float,
