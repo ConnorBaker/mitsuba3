@@ -95,6 +95,12 @@ template <typename Ptr, typename Cls> void bind_shape_generic(Cls &cls) {
        .def("shape_type",
             [](Ptr shape) { return shape->shape_type(); },
             D(Shape, shape_type))
+       .def("ray_visibility",
+            [](Ptr shape) { return shape->ray_visibility(); },
+            D(Shape, ray_visibility))
+       .def("has_ray_visibility_mask",
+            [](Ptr shape) { return shape->has_ray_visibility_mask(); },
+            D(Shape, has_ray_visibility_mask))
        .def("interior_medium",
             [](Ptr shape) -> RetMedium { return shape->interior_medium(); },
             D(Shape, interior_medium))

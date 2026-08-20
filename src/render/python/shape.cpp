@@ -24,4 +24,14 @@ MI_PY_EXPORT(DiscontinuityFlags) {
         .def_value(ShapeType, Ellipsoids)
         .def_value(ShapeType, EllipsoidsMesh)
         .def_value(ShapeType, Invalid);
+
+    auto ray_visibility = nb::enum_<RayVisibility>(m, "RayVisibility", nb::is_arithmetic(),
+                                                   D(RayVisibility))
+        .def_value(RayVisibility, Camera)
+        .def_value(RayVisibility, Diffuse)
+        .def_value(RayVisibility, Glossy)
+        .def_value(RayVisibility, Transmission)
+        .def_value(RayVisibility, VolumeScatter)
+        .def_value(RayVisibility, Shadow)
+        .def_value(RayVisibility, All);
 }

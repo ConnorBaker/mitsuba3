@@ -1,0 +1,156 @@
+"""Blender-style per-object ray visibility (\\ref RayVisibility).
+
+Every behavioural assertion here is a RENDERED comparison against the same scene with the
+switch left alone, because that is the only thing that establishes the feature does what its
+name says: a property that parses, is stored, and is never tested by any ray would sail
+through a construction-time check and change no pixel.
+
+The scenes are built so that each switch is isolated BY GEOMETRY rather than by luck -- the
+occluder in the shadow scene stands between the light and the floor but not between the floor
+and the camera, and the one in the camera scene stands between the camera and the floor but
+above the light. So a single flag is the only thing that can move the image.
+"""
+
+import pytest
+import drjit as dr
+import mitsuba as mi
+
+
+def _base(res=32, spp=128):
+    return {
+        'type': 'scene',
+        'integrator': {'type': 'path', 'max_depth': 4},
+        'sensor': {
+            'type': 'perspective',
+            # Looking DOWN at the floor from one side, with a narrow field of view so every
+            # camera ray descends: no ray can wander up into the occluder plane by accident.
+            'fov': 20,
+            'to_world': mi.ScalarTransform4f().look_at(origin=[0, -6, 2],
+                                                       target=[0, 0, 0],
+                                                       up=[0, 0, 1]),
+            'film': {'type': 'hdrfilm', 'width': res, 'height': res,
+                     'rfilter': {'type': 'box'}, 'pixel_format': 'rgb'},
+            'sampler': {'type': 'independent', 'sample_count': spp},
+        },
+        'floor': {
+            'type': 'rectangle',
+            'to_world': mi.ScalarTransform4f().scale(4.0),
+            'bsdf': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [1, 1, 1]}},
+        },
+    }
+
+
+def _shadow_scene(occluder_props):
+    """Point light overhead, opaque slab between it and the floor.
+
+    A `point` emitter is deliberate: it is a delta light, so it contributes through next-event
+    estimation ONLY and can never be seen by a camera ray. Whatever the image shows came
+    through a shadow ray.
+    """
+    d = _base()
+    d['light'] = {'type': 'point', 'position': [0, 0, 6],
+                  'intensity': {'type': 'rgb', 'value': [200, 200, 200]}}
+    occluder = {
+        'type': 'rectangle',
+        'to_world': mi.ScalarTransform4f().translate([0, 0, 3]).scale(4.0),
+        'bsdf': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [0, 0, 0]}},
+    }
+    occluder.update(occluder_props)
+    d['occluder'] = occluder
+    return mi.load_dict(d)
+
+
+def _camera_scene(occluder_props):
+    """Slab between the camera and the floor, with the light UNDERNEATH the slab.
+
+    The light sits below the occluder plane, so no shadow ray ever reaches the occluder and
+    the floor is lit in both arms; the only thing the flag can change is what primary rays
+    see.
+    """
+    d = _base()
+    d['light'] = {'type': 'point', 'position': [0, 0, 0.5],
+                  'intensity': {'type': 'rgb', 'value': [50, 50, 50]}}
+    occluder = {
+        'type': 'rectangle',
+        'to_world': mi.ScalarTransform4f().translate([0, 0, 1]).scale(4.0),
+        'bsdf': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [0, 0, 0]}},
+    }
+    occluder.update(occluder_props)
+    d['occluder'] = occluder
+    return mi.load_dict(d)
+
+
+def _mean(scene, spp=128):
+    return float(dr.mean(mi.TensorXf(mi.render(scene, spp=spp)).array, axis=None)[0])
+
+
+def test01_default_is_all(variant_scalar_rgb):
+    """A shape that mentions none of the properties is visible to everything."""
+    shape = mi.load_dict({'type': 'rectangle'})
+    assert shape.ray_visibility() == int(mi.RayVisibility.All)
+    assert not shape.has_ray_visibility_mask()
+
+    scene = mi.load_dict({'type': 'scene', 'a': {'type': 'rectangle'}})
+    assert not scene.has_ray_visibility_masks()
+
+
+@pytest.mark.parametrize('prop,bit', [
+    ('visible_camera', 'Camera'),
+    ('visible_diffuse', 'Diffuse'),
+    ('visible_glossy', 'Glossy'),
+    ('visible_transmission', 'Transmission'),
+    ('visible_volume_scatter', 'VolumeScatter'),
+    ('visible_shadow', 'Shadow'),
+])
+def test02_each_property_clears_exactly_its_bit(variant_scalar_rgb, prop, bit):
+    shape = mi.load_dict({'type': 'rectangle', prop: False})
+    expected = int(mi.RayVisibility.All) & ~int(getattr(mi.RayVisibility, bit))
+    assert shape.ray_visibility() == expected
+    assert shape.has_ray_visibility_mask()
+
+    scene = mi.load_dict({'type': 'scene', 'a': {'type': 'rectangle', prop: False}})
+    assert scene.has_ray_visibility_masks()
+
+
+def test03_shadow_visibility_lets_nee_through(variants_all_rgb):
+    blocked = _mean(_shadow_scene({}))
+    passed  = _mean(_shadow_scene({'visible_shadow': False}))
+
+    assert blocked < 1e-4, blocked
+    assert passed > 1.0, passed
+
+
+def test04_shadow_switch_does_not_move_the_others(variants_all_rgb):
+    """Turning off a DIFFERENT switch must not open the shadow path."""
+    blocked = _mean(_shadow_scene({}))
+    for prop in ('visible_camera', 'visible_diffuse', 'visible_glossy',
+                 'visible_transmission', 'visible_volume_scatter'):
+        other = _mean(_shadow_scene({prop: False}))
+        assert other < 1e-4, (prop, other)
+        assert dr.allclose(other, blocked, atol=1e-6), (prop, other, blocked)
+
+
+def test05_camera_visibility_hides_only_primary_rays(variants_all_rgb):
+    opaque      = _mean(_camera_scene({}))
+    see_through = _mean(_camera_scene({'visible_camera': False}))
+
+    # The slab's lit side faces away from the camera, so with it visible the frame is black.
+    assert opaque < 1e-4, opaque
+    assert see_through > 0.05, see_through
+
+
+def test06_declaring_an_unused_type_changes_nothing(variants_all_rgb):
+    """The walk and the fast path must agree where both are valid.
+
+    `visible_volume_scatter` is not a ray type any surface integrator traces, so declaring it
+    flips the scene onto the visibility WALK without changing which shapes any ray can see.
+    The two must then produce the same image -- this is what rules out the walk itself
+    (re-spawned rays, restated distances, the epsilon offsets) quietly losing energy.
+    """
+    ref    = _mean(_camera_scene({}))
+    walked = _mean(_camera_scene({'visible_volume_scatter': False}))
+    assert dr.allclose(ref, walked, atol=1e-6), (ref, walked)
+
+    ref    = _mean(_shadow_scene({'visible_shadow': False}))
+    walked = _mean(_shadow_scene({'visible_shadow': False, 'visible_volume_scatter': False}))
+    assert dr.allclose(ref, walked, rtol=1e-5), (ref, walked)

@@ -89,7 +89,21 @@ public:
     MI_IMPORT_BASE(MonteCarloIntegrator, m_max_depth, m_rr_depth, m_hide_emitters)
     MI_IMPORT_TYPES(Scene, Sampler, Medium, Emitter, EmitterPtr, BSDF, BSDFPtr)
 
-    PathIntegrator(const Properties &props) : Base(props) { }
+    PathIntegrator(const Properties &props) : Base(props) {
+        /* A separate budget for NULL interactions, which is how Blender/Cycles counts.
+           `max_depth` counts scattering EVENTS there; passing through a transparent surface
+           is not one, and gets its own `transparent_max_bounces`. Mitsuba has historically
+           charged both to `max_depth`, which leaves a converter two bad options: spend the
+           light's bounce budget on transparent geometry (too dark), or add the two budgets
+           together (too bright -- measured at +20% on a high-albedo interior, because the
+           extra allowance is spent on REAL bounces wherever the path meets no transparent
+           surface). Neither is what Blender does; this is.
+
+           The default is -1, meaning "no separate budget": null interactions are charged to
+           `max_depth` exactly as before, so no existing scene changes. */
+        m_transparent_max_depth = props.get<int>("transparent_max_depth", -1);
+        m_separate_null_budget = m_transparent_max_depth >= 0;
+    }
 
     std::pair<Spectrum, Bool> sample(const Scene *scene,
                                      Sampler *sampler,
@@ -110,6 +124,8 @@ public:
         Float eta                     = 1.f;
         PreliminaryIntersection3f pi  = dr::zeros<PreliminaryIntersection3f>();
         UInt32 depth                  = 0;
+        // Counted separately from `depth` only when `transparent_max_depth` was given.
+        UInt32 null_depth             = 0;
 
         // If m_hide_emitters == false, the environment emitter will be visible
         Mask valid_ray = !m_hide_emitters && (scene->environment() != nullptr);
@@ -133,6 +149,7 @@ public:
             Spectrum result;
             Float eta;
             UInt32 depth;
+            UInt32 null_depth;
             Mask valid_ray;
             Interaction3f prev_si;
             Float prev_bsdf_pdf;
@@ -141,7 +158,7 @@ public:
             Sampler* sampler;
 
             DRJIT_STRUCT(LoopState, ray, pi, throughput, result, eta, depth, \
-                valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta,
+                null_depth, valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta,
                 active, sampler)
         } ls = {
             ray,
@@ -323,7 +340,17 @@ public:
 
             // -------------------- Stopping criterion ---------------------
 
-            dr::masked(ls.depth, si.is_valid()) += 1;
+            /* Charge the interaction to the right budget. A `null` BSDF is a pass-through,
+               not a scattering event, so with a separate budget configured it is counted as
+               Blender counts it. Without one the historical behaviour is reproduced exactly:
+               everything lands on `depth`. */
+            if (m_separate_null_budget) {
+                Mask is_null = has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
+                dr::masked(ls.null_depth, si.is_valid() && is_null) += 1;
+                dr::masked(ls.depth, si.is_valid() && !is_null) += 1;
+            } else {
+                dr::masked(ls.depth, si.is_valid()) += 1;
+            }
 
             Float throughput_max = dr::max(unpolarized_spectrum(ls.throughput));
 
@@ -338,6 +365,12 @@ public:
 
             ls.active = active_next && (!rr_active || rr_continue) &&
                         (throughput_max != 0.f);
+
+            /* Tested here rather than beside `active_next` because it needs THIS iteration's
+               count, which is only known after the interaction has been charged above. A path
+               may cross `transparent_max_depth` null surfaces; the one after that ends it. */
+            if (m_separate_null_budget)
+                ls.active &= ls.null_depth <= (uint32_t) m_transparent_max_depth;
 
             if (unlikely(scene->has_ray_visibility_masks())) {
                 /* Blender-style per-object ray visibility (\ref RayVisibility). Which switch
@@ -380,9 +413,14 @@ public:
     std::string to_string() const override {
         return tfm::format("PathIntegrator[\n"
             "  max_depth = %u,\n"
+            "  transparent_max_depth = %i,\n"
             "  rr_depth = %u\n"
-            "]", m_max_depth, m_rr_depth);
+            "]", m_max_depth, m_transparent_max_depth, m_rr_depth);
     }
+
+    /// Separate bounce budget for `null` (transparent) interactions; -1 disables it
+    int m_transparent_max_depth = -1;
+    bool m_separate_null_budget = false;
 
     /// Compute a multiple importance sampling weight using the power heuristic
     Float mis_weight(Float pdf_a, Float pdf_b) const {
