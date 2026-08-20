@@ -167,6 +167,7 @@ public:
             result,
             eta,
             depth,
+            null_depth,
             valid_ray,
             prev_si,
             prev_bsdf_pdf,
