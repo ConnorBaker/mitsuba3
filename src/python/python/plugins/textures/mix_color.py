@@ -60,6 +60,12 @@ class Mix(mi.Texture):
     def __init__(self, props):
         super().__init__(props)
         self.blend_type = props.get('blend_type', blend_type_mix)
+        # Which of Blender's three Mix data types this node is, so that a read through a
+        # FLOAT socket applies the conversion Blender would (see `eval_1`).
+        self.data_type = props.get('data_type', 'RGBA')
+        if self.data_type not in ('RGBA', 'VECTOR', 'FLOAT'):
+            raise ValueError(f"MixColor: unknown data_type {self.data_type}; expected one "
+                             f"of RGBA, VECTOR, FLOAT.")
         self.clamp_result = props.get('clamp_result', False)
         self.clamp_factor = props.get('clamp_factor', False)
         # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
@@ -84,9 +90,24 @@ class Mix(mi.Texture):
         return mi.UnpolarizedSpectrum(self.process(si, val_a, val_b, active))
 
     def eval_1(self, si, active):
-        val_a = self.a.eval_1(si, active)
-        val_b = self.b.eval_1(si, active)
-        return mi.Float(self.process(si, val_a, val_b, active))
+        # HSR: BLEND IN THREE CHANNELS, THEN CONVERT -- which is what Cycles does, and what
+        # the scalar version could not do. Most of `blend` below is written on `Color3f`
+        # (SUBTRACT, DIVIDE, DARKEN, OVERLAY, the four HSV modes, ...), so feeding it two
+        # `Float`s returned a `Color3f` that `mi.Float(...)` then refused to construct: a
+        # colour Mix read through a float socket -- a Mix driving a Roughness, say -- raised
+        # `Could not construct from sequence` mid-render.
+        #
+        # Blender does not evaluate the node differently for a float socket either; it
+        # inserts a CONVERSION node after it (`svm_node_convert`,
+        # intern/cycles/kernel/svm/convert.h). Which conversion depends on the SOURCE socket:
+        # NODE_CONVERT_CF is `linear_rgb_to_gray` (a luminance dot product) for a Color, and
+        # NODE_CONVERT_VF is `average` for a Vector. A FLOAT-typed Mix needs no conversion at
+        # all, and both formulas are exact on the (v, v, v) such a mix produces, so the two
+        # cases below cover all three data types.
+        c = self.eval_3(si, active)
+        if self.data_type == 'VECTOR':
+            return (c.x + c.y + c.z) * (1.0 / 3.0)
+        return mi.luminance(c)
 
     def eval_3(self, si, active):
         val_a = self.a.eval_3(si, active)

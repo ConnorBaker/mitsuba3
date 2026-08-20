@@ -77,6 +77,11 @@ class Ramp(mi.Texture):
         self.inter = props.get('interpolation', inter_lin)
         self.hue_inter = props.get('hue_interpolation', hue_inter_near)
         self.fac = props.get_texture('fac', 0.5)
+        # 'Color' or 'Alpha' -- the node's output socket the caller actually read.
+        self.output = props.get('output', 'Color')
+        if self.output not in ('Color', 'Alpha'):
+            raise ValueError(f"ColorRamp: unknown output {self.output}; expected Color or "
+                             f"Alpha.")
 
         self.table = None
         self.elems = None
@@ -147,12 +152,22 @@ class Ramp(mi.Texture):
         cb.put('fac', self.fac, +mi.ParamFlags.Differentiable)
 
     def eval_1(self, si, active):
-        _, res = self.process(si, active)
-        return res
+        # HSR: WHICH OUTPUT SOCKET IS WIRED DECIDES THIS. `eval_1` used to return the ALPHA
+        # unconditionally, so a ramp's COLOUR output driving a float socket -- a Roughness,
+        # a Fac -- silently produced the alpha channel instead. Blender inserts a conversion
+        # node after a Color read through a float socket (`NODE_CONVERT_CF`,
+        # intern/cycles/kernel/svm/convert.h), which is `linear_rgb_to_gray`, a luminance
+        # dot product; the Alpha output needs no conversion because it is already a float.
+        color, alpha = self.process(si, active)
+        if self.output == 'Alpha':
+            return alpha
+        return mi.luminance(color)
 
     def eval_3(self, si, active):
-        res, _ = self.process(si, active)
-        return res
+        color, alpha = self.process(si, active)
+        if self.output == 'Alpha':
+            return mi.Color3f(alpha)
+        return color
 
     def eval(self, si, active = True):
         return mi.UnpolarizedSpectrum(self.eval_3(si, active))
