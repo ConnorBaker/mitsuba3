@@ -744,6 +744,7 @@ Mesh<Float, Spectrum>::merge(const Mesh *other) const {
         other->has_vertex_normals() != has_vertex_normals() ||
         other->has_vertex_texcoords() != has_vertex_texcoords() ||
         other->has_face_normals() != has_face_normals() ||
+        other->ray_visibility() != ray_visibility() ||
         other->has_flipped_normals() != has_flipped_normals() ||
         other->has_mesh_attributes() || has_mesh_attributes())
         Throw("Mesh::merge(): the two meshes are incompatible (%s and %s)!",
@@ -767,6 +768,13 @@ Mesh<Float, Spectrum>::merge(const Mesh *other) const {
         m_name + " + " + other->m_name, m_vertex_count + other->vertex_count(),
         m_face_count + other->face_count(), props, has_vertex_normals(),
         has_vertex_texcoords());
+
+    /* `Properties` has no spelling for the ray-visibility mask that the base `Shape`
+       constructor could read back (it parses the six `visible_*` booleans, and this
+       function does not synthesise them), so the freshly built mesh would otherwise
+       silently default to RayVisibility::All. The guard above has already established
+       that both operands carry the same mask. */
+    result->m_ray_visibility = m_ray_visibility;
 
     result->m_vertex_positions =
         dr::concat(m_vertex_positions, other->m_vertex_positions);

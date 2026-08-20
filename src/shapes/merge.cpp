@@ -36,6 +36,22 @@ public:
             key.has_normals = mesh->has_vertex_normals();
             key.has_texcoords = mesh->has_vertex_texcoords();
             key.has_face_normals = mesh->has_face_normals();
+            /* Ray visibility is part of a shape's IDENTITY, not a shading detail: two
+               meshes that differ in it are different objects to the transport code. It
+               was absent from this key, so a `visible_shadow = false` window pane fused
+               with an ordinary wall and the merged mesh -- built from `Properties` that
+               never mention the mask -- came back out at RayVisibility::All. The pane
+               then blocked the shadow rays it exists to let through, silently, with no
+               warning and no error. MEASURED on the Blender splash scene: the interior
+               fell 177x (mean radiance 0.004062 -> 0.000023 against an invariant Cycles
+               reference of 0.003836) purely by toggling `load_dict(optimize=)`. */
+            key.ray_visibility = mesh->ray_visibility();
+            /* `Mesh::merge` THROWS on a `flip_normals` mismatch but this key did not
+               separate on it, so two same-BSDF meshes differing only in that flag
+               hash-collided and aborted the load outright ("the two meshes are
+               incompatible") on a scene that is perfectly legal. Splitting them here
+               turns a hard failure into the grouping the throw always expected. */
+            key.flip_normals = mesh->has_flipped_normals();
 
             auto [it, success] = tbl.try_emplace(key, mesh);
             if (!success)
@@ -73,6 +89,8 @@ private:
         bool has_normals;
         bool has_texcoords;
         bool has_face_normals;
+        uint32_t ray_visibility;
+        bool flip_normals;
 
         bool operator==(const Key &o) const {
             return bsdf == o.bsdf &&
@@ -82,7 +100,9 @@ private:
                    sensor == o.sensor &&
                    has_normals == o.has_normals &&
                    has_texcoords == o.has_texcoords &&
-                   has_face_normals == o.has_face_normals;
+                   has_face_normals == o.has_face_normals &&
+                   ray_visibility == o.ray_visibility &&
+                   flip_normals == o.flip_normals;
         }
     };
 
@@ -97,9 +117,9 @@ private:
         size_t operator()(const Key &k) const {
             size_t seed = 0;
             int flags = (k.has_normals ? 1 : 0) + (k.has_texcoords ? 2 : 0) +
-                        (k.has_face_normals ? 4 : 0);
+                        (k.has_face_normals ? 4 : 0) + (k.flip_normals ? 8 : 0);
             hash_combine(seed, k.bsdf, k.interior_medium, k.exterior_medium,
-                         k.emitter, k.sensor, flags);
+                         k.emitter, k.sensor, flags, k.ray_visibility);
             return seed;
         }
     };
