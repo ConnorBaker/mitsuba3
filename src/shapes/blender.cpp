@@ -273,6 +273,7 @@ public:
         std::vector<VertexBinding> vertex_map(vertex_count);
 
         size_t duplicates_ctr = 0;
+        size_t zero_normal_ctr = 0;
         for (size_t tri_loop_id = 0; tri_loop_id < loop_tri_count; tri_loop_id++) {
             int face_id;
             if (version >= Version(3, 6, 0))
@@ -327,6 +328,16 @@ public:
             face_points[1] = InputPoint3f(co_1[0], co_1[1], co_1[2]);
             face_points[2] = InputPoint3f(co_2[0], co_2[1], co_2[2]);
 
+            // The triangle's own geometric normal, computed for every face rather than
+            // only for flat ones: it is also the fallback for a vertex whose stored normal
+            // is exactly zero (see below).
+            const InputVector3f e1 = face_points[1] - face_points[0];
+            const InputVector3f e2 = face_points[2] - face_points[0];
+            InputNormal3f geo_normal = m_to_world.scalar() * dr::cross(e1, e2);
+            const bool degenerate_face = dr::all(geo_normal == 0.f);
+            if (!degenerate_face)
+                geo_normal = dr::normalize(geo_normal);
+
             InputNormal3f normal(0.f);
             bool smooth_face;
             if (version >= Version(3, 6, 0)) {
@@ -337,13 +348,34 @@ public:
             }
             if (!smooth_face && !m_face_normals) {
                 // Flat shading, use per face normals (only if the mesh is not globally flat)
-                const InputVector3f e1 = face_points[1] - face_points[0];
-                const InputVector3f e2 = face_points[2] - face_points[0];
-                normal = m_to_world.scalar() * dr::cross(e1, e2);
-                if(unlikely(dr::all(normal == 0.f)))
+                if (unlikely(degenerate_face))
                     continue; // Degenerate triangle, ignore it
-                else
-                    normal = dr::normalize(normal);
+                normal = geo_normal;
+            } else if (smooth_face && !m_face_normals && unlikely(degenerate_face)) {
+                // HSR: a smooth face whose geometry is degenerate has no usable normal
+                // either way, and the fallback below would have nothing to fall back TO.
+                // Skipped here, before any of its vertices is emitted, so the vertex buffer
+                // never gains an entry no triangle references.
+                bool any_zero = false;
+                for (int i = 0; i < 3 && !any_zero; i++) {
+                    size_t li, vi;
+                    if (version >= Version(3, 6, 0)) {
+                        li = ((const int *) tri_loops[tri_loop_id])[i];
+                        vi = loops[li];
+                    } else {
+                        li = tri_loops_old[tri_loop_id].tri[i];
+                        vi = loops_old[li].v;
+                    }
+                    if (vi >= vertex_count)
+                        fail("reference to invalid vertex %i!", vi);
+                    InputNormal3f n = (version <= Version(3, 0, 0))
+                        ? InputNormal3f(verts_old_2[vi].no[0], verts_old_2[vi].no[1],
+                                        verts_old_2[vi].no[2])
+                        : InputNormal3f(normals[vi][0], normals[vi][1], normals[vi][2]);
+                    any_zero = dr::all(n == 0.f);
+                }
+                if (any_zero)
+                    continue;
             }
 
             InputFloat color_factor = dr::rcp(255.f);
@@ -375,9 +407,18 @@ public:
                         normal = m_to_world.scalar() * InputNormal3f(no[0], no[1], no[2]);
                     }
 
-                    if(unlikely(dr::all(normal == 0.f)))
-                        fail("invalid normals!");
-                    else
+                    // HSR: an exactly-zero vertex normal used to ABORT the whole mesh.
+                    // Blender's own 4.1 splash scene contains them -- a vertex whose
+                    // incident faces are all degenerate, or whose face normals cancel --
+                    // and Blender renders those meshes without comment, so refusing the
+                    // mesh loses far more than the vertex does. The triangle's geometric
+                    // normal is substituted, which is the only defined answer available,
+                    // and the count is reported rather than swallowed: a mesh that needed
+                    // the fallback has bad data and the user should hear about it.
+                    if (unlikely(dr::all(normal == 0.f))) {
+                        normal = geo_normal;
+                        zero_normal_ctr++;
+                    } else
                         normal = dr::normalize(normal);
                     vert_key.smooth = true;
                 } else {
@@ -454,6 +495,10 @@ public:
             tmp_triangles.push_back(triangle);
         }
         Log(Info, "%s: Removed %i duplicates", m_name, duplicates_ctr);
+        if (zero_normal_ctr > 0)
+            Log(Warn, "%s: %i vertex normal(s) were exactly zero and were replaced by the "
+                      "triangle's geometric normal. The source mesh has degenerate geometry.",
+                m_name, zero_normal_ctr);
 
         if (vertex_ctr == 0)
             return;
