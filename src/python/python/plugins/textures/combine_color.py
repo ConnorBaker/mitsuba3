@@ -11,9 +11,14 @@ class CombineColor(mi.Texture):
         mi.Texture.__init__(self, props)
         self.mode = props.get('mode', 'RGB')
         assert self.mode == 'RGB', self.mode
-        self.R = props.get_texture('red', 0.0)
-        self.G = props.get_texture('green', 0.0)
-        self.B = props.get_texture('blue', 0.0)
+        # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
+        # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
+        # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
+        # operand of -1.0 are all ordinary -- so they take the UNBOUNDED form. This was not a
+        # theoretical concern: it was found by rendering a Mapping node with a negative Location.
+        self.R = props.get_unbounded_texture('red', 0.0)
+        self.G = props.get_unbounded_texture('green', 0.0)
+        self.B = props.get_unbounded_texture('blue', 0.0)
 
     def traverse(self, cb):
         cb.put('R', self.R, +mi.ParamFlags.Differentiable)

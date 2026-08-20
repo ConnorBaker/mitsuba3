@@ -12,8 +12,15 @@ class UVWrapper(mi.Texture):
     '''
     def __init__(self, props):
         mi.Texture.__init__(self, props)
-        self.uv = props.get('uv')
-        self.input = props.get('input')
+        # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
+        # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
+        # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
+        # operand of -1.0 are all ordinary -- so they take the UNBOUNDED form. This was not a
+        # theoretical concern: it was found by rendering a Mapping node with a negative Location.
+        # HSR: both used `props.get`, which does not promote a constant to a Texture,
+        # so a constant on either socket faulted on `.eval_3` mid-render.
+        self.uv = props.get_unbounded_texture('uv', 0.0)
+        self.input = props.get_texture('input', 0.0)
 
     def eval_si(self, si, active):
         si = mi.SurfaceInteraction3f(si)

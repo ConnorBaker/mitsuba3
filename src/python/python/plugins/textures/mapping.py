@@ -59,10 +59,15 @@ class Mapping(mi.Texture):
             raise ValueError(
                 f'Mapping: vector_type {self.vector_type} is not supported '
                 f'(supported: {", ".join(Mapping.SUPPORTED)})')
-        self.vector   = props.get_texture('vector', 0.0)
-        self.location = props.get_texture('location', 0.0)
-        self.rotation = props.get_texture('rotation', 0.0)
-        self.scale    = props.get_texture('scale', 1.0)
+        # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
+        # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
+        # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
+        # operand of -1.0 are all ordinary -- so they take the UNBOUNDED form. This was not a
+        # theoretical concern: it was found by rendering a Mapping node with a negative Location.
+        self.vector   = props.get_unbounded_texture('vector', 0.0)
+        self.location = props.get_unbounded_texture('location', 0.0)
+        self.rotation = props.get_unbounded_texture('rotation', 0.0)
+        self.scale    = props.get_unbounded_texture('scale', 1.0)
 
     def traverse(self, cb):
         cb.put('vector', self.vector, mi.ParamFlags.Differentiable)

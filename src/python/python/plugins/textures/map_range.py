@@ -11,12 +11,17 @@ class MapRange(mi.Texture):
         mi.Texture.__init__(self, props)
         self.clamp = props.get('clamp', True)
         self.vector = props.get('vector', True) # Whether to interpret the inputs as vectors or floats
-        self.steps    = props.get_texture('steps', 4.0)
-        self.input    = props.get_texture('input', 1.0)
-        self.from_min = props.get_texture('from_min', 0.0)
-        self.from_max = props.get_texture('from_max', 1.0)
-        self.to_min   = props.get_texture('to_min', 0.0)
-        self.to_max   = props.get_texture('to_max', 1.0)
+        # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
+        # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
+        # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
+        # operand of -1.0 are all ordinary -- so they take the UNBOUNDED form. This was not a
+        # theoretical concern: it was found by rendering a Mapping node with a negative Location.
+        self.steps    = props.get_unbounded_texture('steps', 4.0)
+        self.input    = props.get_unbounded_texture('input', 1.0)
+        self.from_min = props.get_unbounded_texture('from_min', 0.0)
+        self.from_max = props.get_unbounded_texture('from_max', 1.0)
+        self.to_min   = props.get_unbounded_texture('to_min', 0.0)
+        self.to_max   = props.get_unbounded_texture('to_max', 1.0)
         self.interpolation_type = props.get('interpolation_type', 'LINEAR')
 
     def traverse(self, cb):

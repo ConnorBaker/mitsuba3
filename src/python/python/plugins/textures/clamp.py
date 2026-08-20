@@ -9,9 +9,14 @@ class Clamp(mi.Texture):
     '''
     def __init__(self, props):
         mi.Texture.__init__(self, props)
-        self.input = props.get_texture('input', 1.0)
-        self.min = props.get_texture('min', 0.0)
-        self.max = props.get_texture('max', 1.0)
+        # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
+        # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
+        # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
+        # operand of -1.0 are all ordinary -- so they take the UNBOUNDED form. This was not a
+        # theoretical concern: it was found by rendering a Mapping node with a negative Location.
+        self.input = props.get_unbounded_texture('input', 1.0)
+        self.min = props.get_unbounded_texture('min', 0.0)
+        self.max = props.get_unbounded_texture('max', 1.0)
         self.clamp_type = props.get('clamp_type', 'RANGE')
 
     def traverse(self, cb):

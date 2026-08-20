@@ -62,9 +62,14 @@ class Mix(mi.Texture):
         self.blend_type = props.get('blend_type', blend_type_mix)
         self.clamp_result = props.get('clamp_result', False)
         self.clamp_factor = props.get('clamp_factor', False)
-        self.factor = props.get_texture('factor', 0.5)
-        self.a = props.get_texture('a')
-        self.b = props.get_texture('b')
+        # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
+        # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
+        # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
+        # operand of -1.0 are all ordinary -- so they take the UNBOUNDED form. This was not a
+        # theoretical concern: it was found by rendering a Mapping node with a negative Location.
+        self.factor = props.get_unbounded_texture('factor', 0.5)
+        self.a = props.get_unbounded_texture('a')
+        self.b = props.get_unbounded_texture('b')
     
     def parameters_changed(self, keys = ...):
         pass

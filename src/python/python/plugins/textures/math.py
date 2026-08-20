@@ -72,9 +72,14 @@ class Math(mi.Texture):
     '''
     def __init__(self, props):
         mi.Texture.__init__(self, props)
-        self.input_0 = props.get_texture('input_0')
-        self.input_1 = props.get_texture('input_1', 0.0)
-        self.input_2 = props.get_texture('input_2', 0.0)
+        # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
+        # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
+        # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
+        # operand of -1.0 are all ordinary -- so they take the UNBOUNDED form. This was not a
+        # theoretical concern: it was found by rendering a Mapping node with a negative Location.
+        self.input_0 = props.get_unbounded_texture('input_0')
+        self.input_1 = props.get_unbounded_texture('input_1', 0.0)
+        self.input_2 = props.get_unbounded_texture('input_2', 0.0)
         self.mode = str(props.get('mode'))
         self.clamp = props.get('clamp', False)
 

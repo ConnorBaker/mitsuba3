@@ -55,9 +55,14 @@ class Bump(mi.Texture):
 
     def __init__(self, props):
         mi.Texture.__init__(self, props)
-        self.height   = props.get_texture('height', 0.0)
-        self.strength = props.get_texture('strength', 1.0)
-        self.distance = props.get_texture('distance', 1.0)
+        # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
+        # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
+        # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
+        # operand of -1.0 are all ordinary -- so they take the UNBOUNDED form. This was not a
+        # theoretical concern: it was found by rendering a Mapping node with a negative Location.
+        self.height   = props.get_unbounded_texture('height', 0.0)
+        self.strength = props.get_unbounded_texture('strength', 1.0)
+        self.distance = props.get_unbounded_texture('distance', 1.0)
         self.invert   = props.get('invert', False)
         self.has_normal = 'normal' in props.keys()
         self.normal = props.get_texture('normal', 0.0) if self.has_normal else None
