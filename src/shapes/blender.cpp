@@ -155,6 +155,27 @@ public:
             }
         }
 
+        // HSR: per-VERTEX float3 attributes, keyed by Blender's VERTEX index. The
+        // `vertex_*` family above is per-LOOP 8-bit colour, which is neither the right
+        // index space nor enough precision for a coordinate.
+        //
+        // Blender's Generated texture coordinate is the reason this exists. Cycles'
+        // `attr_create_generated` (intern/cycles/blender/mesh.cpp) reads the CD_ORCO layer
+        // and derives Generated from the UNDEFORMED vertex positions -- so it is NOT an
+        // affine function of the positions this plugin receives, which are the modified
+        // ones, and no amount of arithmetic on the exported mesh can recover it. It has to
+        // travel with the mesh. Because it is a per-vertex attribute it also survives
+        // instancing and particle systems, where a per-object transform would be ambiguous.
+        std::vector<std::pair<std::string, const float (*)[3]>> vattrs;
+        for (auto &key : props) {
+            std::string s(key.name());
+            if (s.rfind("vert_attr3_", 0) == 0)
+                vattrs.push_back({ "vertex_" + s.substr(11),
+                                   reinterpret_cast<const float (*)[3]>(
+                                       props.get<int64_t>(s)) });
+        }
+        bool has_vattrs = !vattrs.empty();
+
         bool has_uvs = props.has_property("uvs");
         const void *uv_ptr = nullptr;
         if (has_uvs)
@@ -194,6 +215,7 @@ public:
         std::vector<std::array<InputFloat, 3>> tmp_normals; // Same here
         std::vector<InputVector2f> tmp_uvs;
         std::vector<std::vector<InputFloat>> tmp_cols; // And same here
+        std::vector<std::vector<InputFloat>> tmp_vattrs; // And same here
         std::vector<ScalarIndex3> tmp_triangles;
 
         tmp_vertices.reserve(vertex_count);
@@ -208,6 +230,13 @@ public:
             for (size_t p = 0; p < cols.size(); p++) {
                 tmp_cols.push_back(std::vector<InputFloat>());
                 tmp_cols[p].reserve(3 * vertex_count);
+            }
+        }
+        if (has_vattrs) {
+            tmp_vattrs.reserve(vattrs.size());
+            for (size_t p = 0; p < vattrs.size(); p++) {
+                tmp_vattrs.push_back(std::vector<InputFloat>());
+                tmp_vattrs[p].reserve(3 * vertex_count);
             }
         }
 
@@ -408,6 +437,17 @@ public:
                             tmp_cols[p].push_back(dr::srgb_to_linear(loop_col.b * color_factor));
                         }
                     }
+                    if (has_vattrs) {
+                        for (size_t p = 0; p < vattrs.size(); p++) {
+                            // Indexed by the BLENDER vertex index, not the loop index, and
+                            // NOT transformed by `m_to_world`: these are object-space
+                            // quantities by construction.
+                            const float *a = vattrs[p].second[vert_index];
+                            tmp_vattrs[p].push_back(a[0]);
+                            tmp_vattrs[p].push_back(a[1]);
+                            tmp_vattrs[p].push_back(a[2]);
+                        }
+                    }
                     triangle[i] = vert_id;
                 }
             }
@@ -432,6 +472,11 @@ public:
         if (has_cols) {
             for (size_t p = 0; p < cols.size(); p++)
                 add_attribute(cols[p].first, 3, tmp_cols[p]);
+        }
+
+        if (has_vattrs) {
+            for (size_t p = 0; p < vattrs.size(); p++)
+                add_attribute(vattrs[p].first, 3, tmp_vattrs[p]);
         }
 
         initialize();

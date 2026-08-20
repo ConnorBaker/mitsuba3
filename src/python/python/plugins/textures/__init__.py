@@ -8,6 +8,7 @@ if mi.variant() is not None and not mi.variant().startswith('scalar'):
         'brightness_contrast',
         'bump',
         'blender_blackbody',
+        'blender_image',
         'clamp',
         'color_ramp',
         'combine_color',

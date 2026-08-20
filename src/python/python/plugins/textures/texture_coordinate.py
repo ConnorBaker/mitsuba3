@@ -5,7 +5,9 @@ import drjit as dr
 import mitsuba as mi
 
 CHANNELS = ('UV', 'Object', 'Generated', 'Normal')
-OBJECT_SPACE = ('Object', 'Generated', 'Normal')
+# Generated is deliberately NOT here: it is a mesh attribute now, so it needs no object
+# frame -- which is exactly what lets it survive instancing and particle systems.
+OBJECT_SPACE = ('Object', 'Normal')
 
 
 def _rows(value):
@@ -41,14 +43,6 @@ def _invert(rows):
     return [row[4:] for row in a]
 
 
-def _vec3(value, default):
-    if value is None:
-        return mi.Vector3f(default)
-    if isinstance(value, (list, tuple)):
-        return mi.Vector3f(float(value[0]), float(value[1]), float(value[2]))
-    return mi.Vector3f(float(value[0]), float(value[1]), float(value[2]))
-
-
 class TextureCoordinate(mi.Texture):
     '''
     Texture coordinates Blender shader node texture.
@@ -62,16 +56,20 @@ class TextureCoordinate(mi.Texture):
 
     Object      to_object * P                       (the object-space position)
     Normal      normalize(to_world^T * N)           (inverse-transpose, i.e. a NORMAL)
-    Generated   (to_object * P - gen_min) / gen_size
+    Generated   the `vertex_generated` MESH ATTRIBUTE, barycentrically interpolated
 
     Camera, Window and Reflection are absent: each depends on the sensor rather than the
     surface, and a coordinate that silently ignores the camera is a wrong picture.
 
-    GENERATED IS EXACT ONLY FOR UNDEFORMED GEOMETRY, and that is enforced on the exporter
-    side rather than here. Blender's Generated is a per-vertex attribute captured from the
-    ORIGINAL mesh coordinates and interpolated across the face; the affine map below
-    reproduces it exactly when the evaluated mesh has the original's vertex positions, and
-    diverges as soon as a modifier moves them.
+    GENERATED IS NOT A FUNCTION OF THE SURFACE POSITION and is not computed here. Cycles'
+    `attr_create_generated` (intern/cycles/blender/mesh.cpp) reads the CD_ORCO layer and
+    derives Generated from the UNDEFORMED vertex coordinates, falling back to the evaluated
+    positions only when that layer is absent. An affine map of the positions this plugin
+    can see therefore reproduces it only for geometry no modifier moved -- which is how
+    this used to be written, with the divergence pushed onto the exporter as a refusal.
+    It is now carried as a per-vertex attribute instead, which is exact under deforming and
+    generative modifiers, and under instancing and particle systems, where there is no
+    single object frame to map through.
     '''
 
     def __init__(self, props):
@@ -92,8 +90,10 @@ class TextureCoordinate(mi.Texture):
         # and doing the transpose on scalars avoids depending on whether drjit's Matrix4f
         # indexes rows or columns.
         self.o2w = _rows(_invert(rows))
-        self.gen_min = _vec3(props.get('generated_min', None), 0.0)
-        self.gen_size = _vec3(props.get('generated_size', None), 1.0)
+        # The mesh attribute Generated is read from. The exporter bakes Blender's texture
+        # space into it (`generated = (undeformed_co - (loc - size)) / (2 * size)`), because
+        # that is where the texspace values live; nothing is recomputed here.
+        self.generated_attribute = str(props.get('generated_attribute', 'vertex_generated'))
 
     def _eval_channel(self, si, active):
         if self.channel == 'UV':
@@ -106,13 +106,14 @@ class TextureCoordinate(mi.Texture):
                               m[0][2] * n.x + m[1][2] * n.y + m[2][2] * n.z)
             norm = dr.norm(out)
             return dr.select(norm > 0.0, out / dr.select(norm > 0.0, norm, 1.0), 0.0)
-        p = mi.Vector3f(self.to_object @ mi.Point3f(si.p))
-        if self.channel == 'Object':
-            return p
-        return mi.Vector3f(
-            dr.select(self.gen_size.x != 0.0, (p.x - self.gen_min.x) / self.gen_size.x, 0.0),
-            dr.select(self.gen_size.y != 0.0, (p.y - self.gen_min.y) / self.gen_size.y, 0.0),
-            dr.select(self.gen_size.z != 0.0, (p.z - self.gen_min.z) / self.gen_size.z, 0.0))
+        if self.channel == 'Generated':
+            # Loud on a mesh that does not carry it: `Mesh::eval_attribute_3` throws for an
+            # unknown name, which is the right outcome -- a Generated coordinate silently
+            # reading zero is a wrong picture, and the exporter is what guarantees the
+            # attribute is present.
+            return mi.Vector3f(si.shape.eval_attribute_3(
+                self.generated_attribute, si, active))
+        return mi.Vector3f(self.to_object @ mi.Point3f(si.p))
 
     def eval(self, si, active):
         # HSR: used to raise. `eval` is the generic entry point -- an `area` emitter calls it
