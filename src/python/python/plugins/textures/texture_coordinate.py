@@ -18,7 +18,11 @@ class TextureCoordinate(mi.Texture):
         return mi.Vector3f(si.uv.x, 1.0-si.uv.y, 0.0) # Follow Blender's convention
 
     def eval(self, si, active):
-        raise ValueError(f"TextureCoordinate: eval not supported!")
+        # HSR: used to raise. `eval` is the generic entry point -- an `area` emitter calls it
+        # to get radiance, and every wrapper plugin (`math`, `mix_color`, ...) forwards its
+        # own `eval` to its inputs' -- so a coordinate anywhere under one of those faulted
+        # mid-render even though `eval_3` right beside it would have answered.
+        return mi.UnpolarizedSpectrum(self.eval_3(si, active))
 
     def eval_1(self, si, active):
         raise ValueError(f"TextureCoordinate: eval_1 not supported!")
