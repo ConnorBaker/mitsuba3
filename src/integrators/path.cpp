@@ -244,13 +244,17 @@ public:
             Float prev_bsdf_pdf;
             Bool prev_bsdf_delta;
             Float min_ray_pdf;
+            /* Which RayVisibility switch this ray currently answers to. It has to be CARRIED
+               rather than recomputed each bounce, because a NULL interaction must not change
+               it -- see the note where it is updated. */
+            UInt32 ray_visibility;
             Bool active;
             Sampler* sampler;
 
             DRJIT_STRUCT(LoopState, ray, pi, throughput, result, eta, depth, \
                 null_depth, diffuse_depth, glossy_depth, transmission_depth, stop_next,
                 valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta, min_ray_pdf,
-                active, sampler)
+                ray_visibility, active, sampler)
         } ls = {
             ray,
             pi,
@@ -268,6 +272,7 @@ public:
             prev_bsdf_pdf,
             prev_bsdf_delta,
             min_ray_pdf,
+            UInt32((uint32_t) RayVisibility::Camera),
             active,
             sampler
         };
@@ -278,7 +283,7 @@ public:
             // the CAMERA cannot see. The ray comes back advanced past them, because `pi.t`
             // is measured along whichever ray the backend was finally handed.
             std::tie(ls.pi, ls.ray) = scene->ray_intersect_preliminary_visible(
-                ls.ray, UInt32((uint32_t) RayVisibility::Camera),
+                ls.ray, ls.ray_visibility,   // initialised to RayVisibility::Camera
                 /* coherent = */ true, ls.active);
         } else {
             ls.pi = scene->ray_intersect_preliminary(ls.ray,
@@ -670,14 +675,38 @@ public:
                    DIFFUSE or GLOSSY, so a diffuse transmission ray answers to BOTH switches
                    and is stopped by a shape that hides either. The type varies per lane,
                    which is why it is a `UInt32` rather than a constant. */
-                UInt32 next_type =
+                UInt32 scattered_type =
                     dr::select(lobe_diffuse, UInt32((uint32_t) RayVisibility::Diffuse),
                                UInt32((uint32_t) RayVisibility::Glossy)) |
                     dr::select(lobe_transmit,
                                UInt32((uint32_t) RayVisibility::Transmission), UInt32(0u));
 
+                /* A NULL interaction does NOT reclassify the ray. Cycles is explicit about
+                   this in `path_state_next` (intern/cycles/kernel/integrator/path_state.h):
+
+                       ray through transparent keeps same flags from previous ray and is
+                       not counted as a regular bounce, transparent has separate max
+
+                   -- it ORs in `PATH_RAY_TRANSPARENT` and returns early, never clearing
+                   `PATH_RAY_CAMERA` and never setting DIFFUSE / GLOSSY / TRANSMIT. So a
+                   camera ray that crosses a transparent surface is STILL a camera ray.
+
+                   Recomputing the type from the sampled lobe made a null crossing turn a
+                   camera ray into a transmission one, which un-hid every shape the camera is
+                   not supposed to see as soon as anything transparent stood in front of it.
+                   Measured in a closed grey box with one lamp behind a single Transparent
+                   pane: Mitsuba's p99 and max were 15.99766 and 16.07686 -- exactly the
+                   emitter's radiance -- against a Cycles image whose maximum anywhere was
+                   0.30489, a 4.04x error in the mean. The same scene with the pane removed
+                   was already correct at 1.0003, so the pane was the whole difference.
+
+                   This is not a corner case for a Blender exporter: every area lamp is
+                   exported as geometry wearing a `null` BSDF, and window glass is routinely
+                   modelled the same way. */
+                ls.ray_visibility = dr::select(lobe_null, ls.ray_visibility, scattered_type);
+
                 std::tie(ls.pi, ls.ray) = scene->ray_intersect_preliminary_visible(
-                    ls.ray, next_type, /* coherent = */ false, ls.active);
+                    ls.ray, ls.ray_visibility, /* coherent = */ false, ls.active);
             } else {
             // Reorder threads based on the shape they hit
             ls.pi = scene->ray_intersect_preliminary(ls.ray,
