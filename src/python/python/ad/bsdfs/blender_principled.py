@@ -58,6 +58,22 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         # Parameter definitions
         self.two_sided = props.get("two_sided", False)
+        # HSR: Blender's Principled `distribution` enum (GGX / MULTI_GGX), which this
+        # plugin previously had no notion of -- it implemented MULTI_GGX unconditionally.
+        # Measured on a one-material furnace sphere against Cycles (constant white world,
+        # saturated base, mean over the frame), mi/cy at a material that says GGX:
+        #
+        #     dielectric r=0.5  1.0018      metal r=0.5  1.0126      glass r=0.5  1.0179
+        #     dielectric r=0.9  1.0052      metal r=0.9  1.0433      glass r=0.9  1.0969
+        #
+        # -- i.e. up to +9.7% too bright, always in the same direction, because the
+        # multiple-scattering energy Cycles only adds under MULTI_GGX was being added
+        # always. The same table at MULTI_GGX is 0.9927..1.0180, which is what this plugin
+        # already reproduced and still must.
+        #
+        # Default True because Cycles' own default is MULTI_GGX: `PrincipledBsdfNode`'s
+        # constructor sets `distribution = CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID`.
+        self.multiscatter = props.get("multiscatter", True)
         self.base_color = props.get_texture("base_color", 0.5)
         self.diffuse_roughness = props.get_texture("diffuse_roughness", 0.0)
         self.roughness = props.get_texture("roughness", 0.5)
@@ -399,9 +415,10 @@ class BlenderPrincipledBSDF(mi.BSDF):
             # this branch already ships and nothing read. Applied HERE, before
             # `sampling_weights` is derived from `weights`, so the lobe-selection
             # probabilities carry the same scale the evaluation does.
-            weights.metallic *= ggx_energy_compensation(
-                attr.roughness, mi.Frame3f.cos_theta(sh_wi), r0=attr.base_color
-            )
+            if self.multiscatter:
+                weights.metallic *= ggx_energy_compensation(
+                    attr.roughness, mi.Frame3f.cos_theta(sh_wi), r0=attr.base_color
+                )
 
         # Transmission lobe
         if self.has_transmission:
@@ -427,11 +444,12 @@ class BlenderPrincipledBSDF(mi.BSDF):
             # Applied to BOTH halves because that table integrates the reflected and the
             # refracted albedo together -- they are one lobe as far as the energy is
             # concerned, and splitting the scale between them would be arbitrary.
-            _ms_glass = ggx_energy_compensation(
-                attr.roughness, mi.Frame3f.cos_theta(sh_wi), eta=attr.eta, glass=True
-            )
-            weights.trans_reflect *= _ms_glass
-            weights.trans_refract *= _ms_glass
+            if self.multiscatter:
+                _ms_glass = ggx_energy_compensation(
+                    attr.roughness, mi.Frame3f.cos_theta(sh_wi), eta=attr.eta, glass=True
+                )
+                weights.trans_reflect *= _ms_glass
+                weights.trans_refract *= _ms_glass
 
         # Specular lobe
         if self.has_specular:
