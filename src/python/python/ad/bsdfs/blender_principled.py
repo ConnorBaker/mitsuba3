@@ -378,7 +378,12 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         if self.has_metallic:
             weights.metallic *= attenuation
-            attenuation = sanitize(attenuation * (1.0 - attr.metallic))
+            # HSR: spend the budget only where the lobe SURVIVES its mask. `masks.metallic
+            # &= front_side` above already zeroed this lobe on the back side, but this line
+            # used the raw attribute, so on a back-side hit the metallic share was deducted
+            # from the budget and then handed to a lobe with weight zero -- annihilated.
+            met_frac = dr.select(masks.metallic, attr.metallic, mi.Float(0.0))
+            attenuation = sanitize(attenuation * (1.0 - met_frac))
 
         # Transmission lobe
         if self.has_transmission:
@@ -388,7 +393,18 @@ class BlenderPrincipledBSDF(mi.BSDF):
             albedos.trans_refract = mi.UnpolarizedSpectrum(
                 (1.0 - F_spec_dielectric) * dr.sqrt(attr.base_color)
             )
-            attenuation = sanitize(attenuation * (1.0 - attr.transmission))
+            # HSR: same defect, and this is the one that dominates. Every lobe BELOW is
+            # front-side-masked (diffuse and specular are both `&= front_side`), so on a
+            # back-side hit the `1 - transmission` remainder has no lobe left to carry it
+            # and is destroyed. Inside the medium the interface is transmissive-only, so
+            # the remainder belongs to the transmission lobes.
+            back = ~is_front_side(sh_wi)
+            weights.trans_reflect = dr.select(back, mi.UnpolarizedSpectrum(attenuation),
+                                              weights.trans_reflect)
+            weights.trans_refract = dr.select(back, mi.UnpolarizedSpectrum(attenuation),
+                                              weights.trans_refract)
+            trans_frac = dr.select(back, mi.Float(1.0), attr.transmission)
+            attenuation = sanitize(attenuation * (1.0 - trans_frac))
 
         # Specular lobe
         if self.has_specular:
