@@ -233,20 +233,35 @@ template <typename Float, typename Spectrum> struct BSDFSample3 {
      * </ul>
      *
      * ZERO IS THE "NOT REPORTED" SENTINEL, deliberately, and a negative one
-     * would be a bug: plugins build their sample both by
-     * \c dr::zeros<BSDFSample3f>() and through the constructor below, so any
-     * sentinel that zero-initialization cannot produce would be reachable
-     * from only one of the two paths and would mean different things
-     * depending on which a plugin happened to use. Zero is safe from both,
-     * and it does not collide with a real value because a microfacet lobe
-     * whose alpha is genuinely zero is a delta lobe and is flagged as one.
+     * would be a bug: plugins build their sample by
+     * \c dr::zeros<BSDFSample3f>(), through the \c wo constructor below, and
+     * through the DEFAULT constructor, so any sentinel that
+     * zero-initialization cannot produce would be reachable from only some of
+     * those paths and would mean different things depending on which a plugin
+     * happened to use. Zero is safe from all three, and it does not collide
+     * with a real value because a microfacet lobe whose alpha is genuinely
+     * zero is a delta lobe and is flagged as one.
+     *
+     * The default member initializer is load-bearing, not decoration. The
+     * default constructor initializes nothing else in this struct -- every
+     * other field is left empty for the caller to fill -- and that is fine for
+     * a field every plugin assigns. This one is NOT assigned by plugins that
+     * predate it, and an unassigned \c Float is an EMPTY Dr.Jit array, not a
+     * zero. Adding this field to \c DRJIT_STRUCT without the initializer made
+     * every Python BSDF that builds its sample as \c mi.BSDFSample3f() -- the
+     * \c translucent and \c refraction plugins both do -- return a struct with
+     * one empty member, which \c ad_call rejects outright:
+     * "callable N returned an empty/uninitialized Dr.Jit array". That took out
+     * whole-scene renders that had nothing to do with roughness. A field added
+     * to a traversed struct has to be valid from EVERY construction path that
+     * already exists, not only the ones its author updated.
      *
      * The one consequence worth stating plainly: a MICROFACET BSDF that
      * leaves this unset is read as fully rough, which over-widens the
      * differential for a near-mirror lobe. It is not silently wrong for
      * anything else.
      */
-    Float sampled_roughness_squared;
+    Float sampled_roughness_squared = 0.f;
 
     //! @}
     // =============================================================

@@ -7779,6 +7779,8 @@ static const char *__doc_mitsuba_RayDifferential_d_x = R"doc()doc";
 
 static const char *__doc_mitsuba_RayDifferential_d_y = R"doc()doc";
 
+static const char *__doc_mitsuba_RayDifferential_diff_scale = R"doc()doc";
+
 static const char *__doc_mitsuba_RayDifferential_fields = R"doc()doc";
 
 static const char *__doc_mitsuba_RayDifferential_fields_2 = R"doc()doc";
