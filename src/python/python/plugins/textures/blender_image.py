@@ -80,18 +80,61 @@ class BlenderImage(mi.Texture):
             raise RuntimeError("blender_image: unknown interpolation '%s'; expected one of %s"
                                % (self.interpolation, ', '.join(INTERPOLATIONS)))
 
+        # WHICH OUTPUT SOCKET OF BLENDER'S IMAGE TEXTURE NODE THIS READ IS.
+        #
+        # HSR: this plugin used to have no such notion and convert unconditionally to RGB,
+        # which DISCARDS the alpha channel. A caller that had wired the node's Alpha socket
+        # -- Blender's Principled `Alpha` input, i.e. every alpha-cutout material there is --
+        # reached `eval_1`, and `eval_1` answered with the LUMINANCE OF THE COLOUR. Nothing
+        # reported it: an alpha-cutout billboard rendered as a fully-formed opaque quad, and
+        # a luminance is a plausible-looking mask, so the image did not obviously accuse
+        # anyone. Measured on the fireplace-flame texture in Blender's 4.1 splash scene
+        # (`gas+fireplace.png`, 600x315, RGBA): true alpha mean 0.31707 with 68.5% of texels
+        # below 0.5, against a substituted luminance mean of 0.83261 -- 2.6x too opaque.
+        #
+        # Spelled as an `output` string rather than inferred from arity because arity cannot
+        # carry it: `eval` (spectrum), `eval_1` (float) and `eval_3` all have to answer for
+        # the SAME socket, and a caller asking for alpha as a spectrum -- which is exactly
+        # what a `math` MULTIPLY scaling an emitter's radiance does, since `Math.eval` calls
+        # `input_1.eval` -- is indistinguishable from one asking for colour. This mirrors
+        # `color_ramp`, which already carries an `output` for the same reason.
+        self.output = str(props.get('output', 'Color'))
+        if self.output not in ('Color', 'Alpha'):
+            raise RuntimeError("blender_image: unknown output '%s'; expected 'Color' or "
+                               "'Alpha'" % self.output)
+
         filename = str(props.get('filename'))
         raw = bool(props.get('raw', False))
         bmp = mi.Bitmap(filename)
-        # `raw` means "these are not colours" (normal maps, roughness, masks). Decoding sRGB
-        # into them is the same silent wrong-render the exporter's colourspace branch exists
-        # to prevent, so the target keeps the source's gamma flag in that case and drops it
-        # otherwise -- which decodes an sRGB source and leaves a linear one alone.
-        target_srgb = bmp.srgb_gamma() if raw else False
-        bmp = bmp.convert(mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, target_srgb)
-
         import numpy as np
-        arr = np.array(bmp, copy=True).astype(np.float32)   # (H, W, 3), row 0 = top
+        if self.output == 'Alpha':
+            # Alpha is never gamma-encoded, so nothing is decoded here: the convert is asked
+            # to KEEP whatever gamma flag the source has, making it a channel re-layout and
+            # not a colour transform. An image with no alpha is opaque, which is what Blender
+            # reports for the Alpha socket of an RGB image.
+            if bmp.has_alpha():
+                bmp = bmp.convert(mi.Bitmap.PixelFormat.RGBA, mi.Struct.Type.Float32,
+                                  bmp.srgb_gamma())
+                a = np.array(bmp, copy=True).astype(np.float32)[..., 3]
+            else:
+                bmp = bmp.convert(mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32,
+                                  bmp.srgb_gamma())
+                a = np.ones(np.array(bmp).shape[:2], dtype=np.float32)
+            # Broadcast to three channels so the interpolation, wrapping and CLIP handling
+            # below are shared verbatim with the colour path rather than forked. `eval_1`
+            # then returns `luminance(a, a, a)`, whose weights sum to one, so it is `a`
+            # exactly; and CLIP's transparent-black outside the image is alpha 0, which is
+            # what Cycles' `read_clip` gives.
+            arr = np.repeat(a[..., None], 3, axis=2)
+        else:
+            # `raw` means "these are not colours" (normal maps, roughness, masks). Decoding
+            # sRGB into them is the same silent wrong-render the exporter's colourspace
+            # branch exists to prevent, so the target keeps the source's gamma flag in that
+            # case and drops it otherwise -- which decodes an sRGB source and leaves a linear
+            # one alone.
+            target_srgb = bmp.srgb_gamma() if raw else False
+            bmp = bmp.convert(mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, target_srgb)
+            arr = np.array(bmp, copy=True).astype(np.float32)   # (H, W, 3), row 0 = top
         self.height, self.width = int(arr.shape[0]), int(arr.shape[1])
         self.data = mi.Float(arr.ravel())
         self._mean = mi.Float(float(arr.mean()))
@@ -192,7 +235,8 @@ class BlenderImage(mi.Texture):
 
     def to_string(self):
         return (f'BlenderImage[resolution=[{self.width}, {self.height}], '
-                f'interpolation={self.interpolation}, extension={self.extension}]')
+                f'interpolation={self.interpolation}, extension={self.extension}, '
+                f'output={self.output}]')
 
 
 mi.register_texture('blender_image', lambda props: BlenderImage(props))
