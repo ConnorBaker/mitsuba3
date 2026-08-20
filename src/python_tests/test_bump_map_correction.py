@@ -178,7 +178,11 @@ def test04_the_material_flag_reaches_eval():
 
     si = dr.zeros(mi.SurfaceInteraction3f, 1)
     si.p = mi.Point3f(0, 0, 0)
-    si.n = si.sh_frame.n = mi.Normal3f(0, 0, 1)
+    si.n = mi.Normal3f(0, 0, 1)
+    # The FULL frame, not just its normal: `dr.zeros` leaves `sh_frame.s`/`.t` at zero and
+    # assigning `.n` does not fill them. `eval` survives a degenerate frame and `sample`
+    # does not, so this line is load-bearing the moment anyone adds a sampling assertion.
+    si.sh_frame = mi.Frame3f(mi.Normal3f(0, 0, 1))
     si.dp_du, si.dp_dv = mi.Vector3f(1, 0, 0), mi.Vector3f(0, 1, 0)
     si.wi = _v3(_sph(0.5))
     ctx = mi.BSDFContext()

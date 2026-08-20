@@ -332,10 +332,69 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # Only lobes with non-zero weights are considered as active
         masks = dotdict({k: (dr.mean(v) > 0.0) for k, v in weights.items()})
 
-        # Masks lobes that only affects rays on the front side
-        front_side = is_front_side(sh_wi)
-        masks.diffuse &= front_side
-        masks.sheen &= front_side
+        # Masks lobes that only affect rays on the front side.
+        #
+        # `front_side` is `dot(N', wi) > 0` -- the view against the BUMP/NORMAL-MAPPED
+        # closure normal, not the geometric one. Cycles applies that test to the MICROFACET
+        # closures only (`bsdf_microfacet_eval` rejects `cos_NI <= 0`); its diffuse-range
+        # closures do not test the view at all. `bsdf_diffuse_eval` and `bsdf_sheen_eval`
+        # both declare the incident direction as `const float3 /*wi*/` -- unnamed, unused --
+        # and `bsdf_oren_nayar_get_intensity` CLAMPS the view cosine rather than rejecting on
+        # it. So diffuse and sheen are excluded from this test.
+        #
+        # THIS is where the strong-bump deficit lived, and it sits UPSTREAM of the per-lobe
+        # masks in `_eval_pdf_impl`. Those were relaxed to Cycles' one-direction form first
+        # and the panel came back BIT-IDENTICAL -- because `weights.diffuse` had already been
+        # zeroed here, so the relaxed mask had nothing left to admit. Measured on the traced
+        # camera rays of a plane carrying a sinusoidal height map at peak gradient 201/uv:
+        # 43.5% of hit pixels have the view below the bumped horizon, and every one of them
+        # returned zero sample weight, zero pdf and zero eval -- black in Mitsuba, lit in
+        # Cycles. With this line removed those same lanes return a 0.410 mean sample weight
+        # against the above-horizon lanes' 0.455, and their zero-weight share falls from
+        # 100% to 48.8% -- next to the above-horizon 43.2%, which is the hemisphere clipping
+        # both engines legitimately do.
+        #
+        # A plane carrying a sinusoidal height map, correction OFF in both engines, res 160,
+        # sweeping frequency and amplitude independently so the DIAGONALS hold peak height
+        # gradient constant while frequency moves 64x. mi/cy before -> after:
+        #
+        #     g/uv     12.6     50.3      201.1     804.2
+        #     before   1.0004   0.7733    0.6337    0.7309
+        #     after    1.0004   1.0001    1.0024    1.0033
+        #
+        # The cells that were already exact stayed exact; worst deviation over the whole
+        # 16-cell grid is now 0.33%. The deficit had tracked the GRADIENT -- the tilt -- and
+        # not the frequency, which is what ruled out a footprint or texture-filtering cause
+        # before this site was found: it was flat across 64x in frequency at fixed gradient
+        # and across an 8x change in render resolution. Three upstream candidates were
+        # measured and cleared first -- the exported bump dict is exact, the in-render
+        # footprint is 0.967x the analytic one-pixel footprint, and the perturbed normal
+        # matches Cycles' own bump-normal render to 0.024 deg mean at the worst cell.
+        #
+        # A genuine BACK-FACE hit is still rejected, but by the OUTGOING direction rather
+        # than here: `_eval_pdf_impl` masks the diffuse-range lobes with `cos_theta(wo) > 0`
+        # in the closure frame, which is exactly the `max(dot(N, wo), 0)` that zeroes Cycles'
+        # own diffuse closure there.
+        #
+        # -----------------------------------------------------------------------------
+        # The MICROFACET half of the same statement, which is a different fix.
+        #
+        # GEOMETRIC, not shading, and this half was NOT obvious. These masks feed the
+        # LAYERING BUDGET below (`met_frac`, and the `attenuation` each lobe consumes), not
+        # just the evaluation. Testing the budget against the SHADING horizon means a metal
+        # whose closure normal has tilted past the view stops claiming its share -- and
+        # `weights.diffuse *= attenuation` then hands the whole budget to DIFFUSE, turning a
+        # mirror into a Lambertian wherever the bump is steep. Measured while writing this:
+        # at 80 deg of normal-map tilt a `metallic = 1` material returned a full-strength
+        # diffuse lobe below the horizon. Cycles has no such fallback -- its microfacet
+        # closure simply evaluates to zero there and the energy is lost.
+        #
+        # Only a genuine BACK-FACE hit means the lobe is absent and its budget is free, which
+        # is what `geo_wi` tests. The shading-horizon rejection these lines used to perform is
+        # not dropped: it moves to `_eval_pdf_impl` as `incoming_above_shading`, where it acts
+        # on evaluation alone. For a material with no normal map the two frames agree in sign
+        # and this is a no-op.
+        front_side = is_front_side(geo_wi)
         masks.clearcoat &= front_side
         masks.metallic &= front_side
         masks.specular &= front_side
@@ -432,12 +491,19 @@ class BlenderPrincipledBSDF(mi.BSDF):
             albedos.trans_refract = mi.UnpolarizedSpectrum(
                 (1.0 - F_spec_dielectric) * dr.sqrt(attr.base_color)
             )
-            # HSR: same defect, and this is the one that dominates. Every lobe BELOW is
-            # front-side-masked (diffuse and specular are both `&= front_side`), so on a
-            # back-side hit the `1 - transmission` remainder has no lobe left to carry it
-            # and is destroyed. Inside the medium the interface is transmissive-only, so
-            # the remainder belongs to the transmission lobes.
-            back = ~is_front_side(sh_wi)
+            # HSR: same defect, and this is the one that dominates. On a BACK-SIDE hit the
+            # reflective lobes are all masked off, so the `1 - transmission` remainder has
+            # no lobe left to carry it and is destroyed. Inside the medium the interface is
+            # transmissive-only, so the remainder belongs to the transmission lobes.
+            #
+            # The side test is GEOMETRIC. It asks "are we inside the medium", and only the
+            # geometry answers that: with a strong normal map a front-facing hit can put
+            # `sh_wi` below the closure horizon without being inside anything, and a
+            # shading-frame test would then hand the budget to transmission on a solid
+            # surface -- while diffuse, which no longer carries a shading-frame front-side
+            # mask, also claimed it. For a material with no normal map the two frames agree
+            # in sign and this is a no-op.
+            back = ~is_front_side(geo_wi)
             weights.trans_reflect = dr.select(back, mi.UnpolarizedSpectrum(attenuation),
                                               weights.trans_reflect)
             weights.trans_refract = dr.select(back, mi.UnpolarizedSpectrum(attenuation),
@@ -634,13 +700,55 @@ class BlenderPrincipledBSDF(mi.BSDF):
         reflect_shading = is_reflection(wi, wo)
         refract_shading = is_refraction(wi, wo)
 
-        masks.diffuse &= reflect_geom & reflect_shading
-        masks.clearcoat &= reflect_geom & reflect_shading
-        masks.sheen &= reflect_geom & reflect_shading
-        masks.metallic &= reflect_geom & reflect_shading
-        masks.specular &= reflect_geom & reflect_shading
-        masks.trans_reflect &= reflect_geom & reflect_shading
-        masks.trans_refract &= refract_geom & refract_shading
+        # THE DIFFUSE-RANGE LOBES TEST ONLY THE OUTGOING DIRECTION against the closure
+        # normal. Cycles' `bsdf_diffuse_eval` and `bsdf_sheen_eval` both declare their
+        # incident direction as `const float3 /*wi*/` -- unnamed, unused -- and return
+        # `max(dot(N', wo), 0)`; `bsdf_oren_nayar_eval` gates on `cosNO > 0` and CLAMPS the
+        # view term rather than rejecting on it. Only the MICROFACET lobes reject
+        # `cos_NI <= 0` (`bsdf_microfacet_eval`), so only they keep the two-direction test.
+        #
+        # THIS CHANGE ON ITS OWN IS A MEASURED NO-OP, and it is written down that way because
+        # the opposite was nearly written down. Relaxing these two masks was tried FIRST, as
+        # a fix for the strong-bump deficit, and the panel came back BIT-IDENTICAL: the
+        # hypothesis was right about the mechanism and wrong about the site, because
+        # `_lobe_weights` had already zeroed `weights.diffuse` and `weights.sheen` through
+        # its own `&= front_side`, so a relaxed mask here had nothing left to admit. The
+        # parity numbers belong to that fix and are recorded beside it. Both edits are
+        # required and neither moves a pixel alone -- which is exactly why the no-op result
+        # must not be read as "this line was already correct".
+        #
+        # `reflect_geom` stays. It is Cycles' smooth-surface condition, which that engine
+        # applies through `bump_shadowing_term` rather than in the closure.
+        outgoing_above_shading = mi.Frame3f.cos_theta(wo) > 0.0
+        # EVERY microfacet closure tests the view against the closure normal:
+        # `bsdf_microfacet_eval` opens with `cos_NI <= 0 -> zero_spectrum()`, commented
+        # "Incoming direction has to be in the upper hemisphere (Cycles convention)", and it
+        # is the shared entry for the reflective, refractive AND glass closures alike. That
+        # test used to live in `_lobe_weights` as `&= front_side`, where it also silently
+        # governed the layering budget; it is here now so it governs evaluation and nothing
+        # else.
+        #
+        # NOT a bare `cos_theta(wi) > 0`. The Cycles convention holds because
+        # `shader_setup_from_ray` FLIPS `sd->N` (and `sd->Ng`) on a backfacing hit, so
+        # `cos_NI > 0` there describes the side the ray actually arrived from. Mitsuba keeps
+        # the un-flipped frame for a one-sided BSDF, so the faithful transcription is the
+        # SAME-SIGN test below: the closure normal and the geometric normal must agree about
+        # which side the view is on. Spelling it `cos_theta(wi) > 0` would reject every
+        # interior hit on a glass material -- which is not a normal-map case at all, and
+        # would have been a much larger regression than the one being fixed.
+        #
+        # `reflect_shading` is not a substitute: it compares `wi` against `wo`, so it admits
+        # the case where BOTH sit below the closure horizon on a geometrically front-facing
+        # hit, which Cycles rejects outright.
+        incoming_above_shading = (mi.Frame3f.cos_theta(wi)
+                                  * mi.Frame3f.cos_theta(si.wi)) > 0.0
+        masks.diffuse &= reflect_geom & outgoing_above_shading
+        masks.clearcoat &= reflect_geom & reflect_shading & incoming_above_shading
+        masks.sheen &= reflect_geom & outgoing_above_shading
+        masks.metallic &= reflect_geom & reflect_shading & incoming_above_shading
+        masks.specular &= reflect_geom & reflect_shading & incoming_above_shading
+        masks.trans_reflect &= reflect_geom & reflect_shading & incoming_above_shading
+        masks.trans_refract &= refract_geom & refract_shading & incoming_above_shading
 
         # Cycles' bump-map correction. `bump_keep` rejects light leaking through the
         # smoothed geometry; `bump_soft` is the GGX shadowing factor, which Cycles applies

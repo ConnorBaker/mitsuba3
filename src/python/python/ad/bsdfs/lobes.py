@@ -442,8 +442,16 @@ class OrenNayarLobe:
         albedo: mi.UnpolarizedSpectrum,
         roughness: mi.Float,
     ) -> Tuple[mi.Float, mi.Float]:
-        cos_theta_i = mi.Frame3f.cos_theta(wi)
-        cos_theta_o = mi.Frame3f.cos_theta(wo)
+        # CLAMPED, as Cycles clamps them: `bsdf_oren_nayar_get_intensity` computes
+        # `nl = max(dot(n, l), 0)` and `nv = max(dot(n, v), 0)` before using either. That
+        # was invisible while the caller masked this lobe off whenever the view fell below
+        # the shading horizon -- the formula was never reached with a negative cosine, so an
+        # unclamped one behaved identically. It is reachable now that the diffuse mask
+        # follows Cycles and tests only the outgoing direction, and unclamped it would put a
+        # negative `cos_theta_i` into `oren_nayar_G` (through `acos` and a `tan`) and into
+        # the `t` denominator.
+        cos_theta_i = dr.maximum(mi.Frame3f.cos_theta(wi), 0.0)
+        cos_theta_o = dr.maximum(mi.Frame3f.cos_theta(wo), 0.0)
 
         sigma = dr.clip(roughness, 0.0, 1.0)
         A = 1.0 / (dr.pi + sigma * (dr.pi / 2.0 - 2.0 / 3.0))
