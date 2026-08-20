@@ -122,11 +122,12 @@ public:
            curve; `cutoff_angle` is then Blender's `spot_size / 2`, which is where BOTH
            curves reach zero. */
         m_blender_falloff = props.has_property("blender_blend");
-        m_blender_blend   = props.get<ScalarFloat>("blender_blend", 0.f);
+        ScalarFloat blender_blend = props.get<ScalarFloat>("blender_blend", 0.f);
+        m_blender_blend   = blender_blend;
         if (m_blender_falloff) {
-            if (m_blender_blend < 0.f || m_blender_blend > 1.f)
+            if (blender_blend < 0.f || blender_blend > 1.f)
                 Throw("The parameter 'blender_blend' must lie in [0, 1] (it is Blender's "
-                      "`spot_blend`), but is %f.", m_blender_blend);
+                      "`spot_blend`), but is %f.", blender_blend);
             /* The linear ramp is switched off rather than left to interact: with
                beam_width == cutoff_angle the legacy curve is a hard step at the cutoff,
                which is exactly where the Blender curve already reaches zero. */
