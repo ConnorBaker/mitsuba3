@@ -464,8 +464,12 @@ public:
 
             if (dr::any_or<true>(active_em)) {
                 // Sample the emitter
+                /* The visibility test is handed to `null_shadow_transmittance` below
+                   whenever the scene contains a pass-through boundary, because `ray_test`
+                   -- which is what `true` asks for here -- cannot see through one. */
+                bool march_shadow = scene->has_null_bsdfs();
                 std::tie(ds, em_weight) = scene->sample_emitter_direction(
-                    si, ls.sampler->next_2d(), true, active_em);
+                    si, ls.sampler->next_2d(), !march_shadow, active_em);
                 active_em &= (ds.pdf != 0.f);
 
                 /* Given the detached emitter sample, recompute its contribution
@@ -474,6 +478,13 @@ public:
                     ds.d = dr::normalize(ds.p - si.p);
                     Spectrum em_val = scene->eval_emitter_direction(si, ds, active_em);
                     em_weight = dr::select(ds.pdf != 0, em_val / ds.pdf, 0);
+                }
+
+                if (unlikely(march_shadow)) {
+                    Spectrum tr =
+                        null_shadow_transmittance(scene, si, ds.p, active_em);
+                    em_weight *= tr;
+                    active_em &= dr::any(unpolarized_spectrum(tr) != 0.f);
                 }
 
                 wo = si.to_local(ds.d);
@@ -536,10 +547,40 @@ public:
             ls.valid_ray |= ls.active && si.is_valid() &&
                          !has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
 
-            // Information about the current vertex needed by the next iteration
-            ls.prev_si = Interaction3f(si);
-            ls.prev_bsdf_pdf = bsdf_sample.pdf;
-            ls.prev_bsdf_delta = has_flag(bsdf_sample.sampled_type, BSDFFlags::Delta);
+            /* Information about the current vertex needed by the next iteration -- but ONLY
+               when this vertex actually scattered. A `null` crossing is a pass-through, and
+               overwriting the MIS bookkeeping with it corrupts the next emitter hit in two
+               separate ways:
+
+                 * `prev_si` becomes the PANE rather than the last real scattering vertex, so
+                   `pdf_emitter_direction` converts the emitter's area density to solid angle
+                   using the wrong distance. A pane hovering just in front of a lamp reports
+                   an almost-zero pdf where the true shading point reports a large one.
+                 * `prev_bsdf_pdf` becomes the null lobe's own pdf (1), which is not a
+                   scattering density at all and belongs to no sampling strategy.
+
+               `mis_weight(prev_bsdf_pdf, em_pdf)` then returns ~1 instead of that strategy's
+               proper share, so a BSDF-sampled emitter hit reached through a clear pane is
+               counted at FULL weight while NEE also counts it -- the emitter is paid for
+               twice. MEASURED as exactly that: a furnace box read 2.0x Cycles on every
+               pane case (1.9943 with one pane, 2.0052/2.0055/2.0059 with six/seven/eight)
+               and exactly 1.0000 with the pane removed. The factor is constant in the pane
+               COUNT, which is what identifies it as a once-per-path MIS error rather than a
+               per-crossing transmittance one.
+
+               This also explains why the bug hid for so long. Before shadow rays were
+               marched through null boundaries, NEE was dead behind a pane (`ray_test` cannot
+               see through one) and this over-weighted BSDF hit was silently standing in for
+               it -- two errors nearly cancelling, for a furnace ratio of 0.9725 that looked
+               like a 2.7% rounding issue rather than two independent defects.
+
+               Cycles guards the same bookkeeping the same way, and `min_ray_pdf` below
+               already carried this exact guard: `if (!(label & LABEL_TRANSPARENT))`. */
+            Mask real_scatter = !has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
+            dr::masked(ls.prev_si, real_scatter) = Interaction3f(si);
+            dr::masked(ls.prev_bsdf_pdf, real_scatter) = bsdf_sample.pdf;
+            dr::masked(ls.prev_bsdf_delta, real_scatter) =
+                has_flag(bsdf_sample.sampled_type, BSDFFlags::Delta);
 
             /* Cycles: `if (!(label & LABEL_TRANSPARENT)) min_ray_pdf = fminf(
                  unguided_bsdf_pdf, min_ray_pdf);` (`kernel/integrator/shade_surface.h`).
@@ -755,6 +796,101 @@ public:
     int m_transmission_max_depth = -1;
     /// True when ANY of the four per-lobe budgets is in use
     bool m_lobe_budgets = false;
+
+    /**
+     * \brief March a shadow ray through `null` boundaries and return its transmittance.
+     *
+     * `Scene::ray_test` is a pure occlusion query: it cannot tell a pane of clear glass
+     * from a wall, and reports Blender's Transparent BSDF as a hit like any other. Testing
+     * NEE visibility with it therefore kills every direct-lighting contribution behind a
+     * transparent surface. MEASURED on a furnace box with one Transparent pane between the
+     * lamp and the room: `scene.ray_test()` across a lone `null` pane returns True, and the
+     * rendered image sat 2.7% below Cycles with the tell of a dead estimator -- the tails
+     * blown out in BOTH directions at 256 spp (mi min 0.01078 / max 0.44534 against cy
+     * 0.03553 / 0.30489) while the no-pane control matched to 1.0001.
+     *
+     * The DEFICIT is the part worth explaining, because "NEE is blocked" on its own predicts
+     * only extra variance: the BSDF-sampled hit on that same emitter is still weighted by
+     * `mis_weight(bsdf_pdf, em_pdf)`, i.e. discounted for an NEE contribution that never
+     * arrived. Half the estimator is missing and the surviving half is still paying its
+     * share, so the result is biased LOW rather than merely noisy. That is why this cannot
+     * be left to converge away.
+     *
+     * Cycles traces a real transparent shadow ray (`integrate_transparent_shadow`), which is
+     * what is reproduced here: pass through anything with a Null lobe, multiplying by its
+     * `eval_null_transmission` (1 for a plain `null`, the alpha for a `mask`), stop dead at
+     * the first surface that has no Null lobe, and charge each crossing to
+     * `transparent_max_depth` -- the SAME budget the main path spends, which is Cycles'
+     * `transparent_max_bounces`. A ray that exceeds it is treated as blocked.
+     *
+     * `RayVisibility::Shadow` is threaded through so that per-object shadow visibility keeps
+     * working; this is the one place it belongs on this path, and `ray_test_visible` -- the
+     * call being replaced -- carried exactly the same bit.
+     *
+     * Not run unless \ref Scene::has_null_bsdfs(), so a scene without a single pass-through
+     * boundary keeps the one fast `ray_test` and pays nothing.
+     */
+    Spectrum null_shadow_transmittance(const Scene *scene,
+                                       const SurfaceInteraction3f &ref,
+                                       const Point3f &target, Mask active) const {
+        struct ShadowState {
+            Mask active;
+            Ray3f ray;
+            Spectrum transmittance;
+            UInt32 crossings;
+
+            DRJIT_STRUCT(ShadowState, active, ray, transmittance, crossings)
+        } ss = { active, ref.spawn_ray_to(target), Spectrum(1.f), UInt32(0) };
+
+        dr::tie(ss) = dr::while_loop(
+            dr::make_tuple(ss),
+            [](const ShadowState &ss) { return dr::detach(ss.active); },
+            [this, scene, target](ShadowState &ss) {
+                /* `..._visible` and not the plain intersect: a shape hidden from shadow
+                   rays must not stop the march either. Reduces to the unmasked call when
+                   the scene carries no visibility masks. */
+                auto [pi, ray] = scene->ray_intersect_preliminary_visible(
+                    ss.ray, UInt32((uint32_t) RayVisibility::Shadow),
+                    /* coherent = */ false, ss.active);
+                SurfaceInteraction3f si =
+                    pi.compute_surface_interaction(ray, +RayFlags::All, ss.active);
+
+                Mask hit = ss.active && si.is_valid();
+
+                BSDFPtr bsdf  = si.bsdf(ray);
+                Mask is_null  = hit && has_flag(bsdf->flags(), BSDFFlags::Null);
+
+                /* Reaching a surface with no pass-through lobe is an ordinary occlusion:
+                   the light is blocked outright, exactly as `ray_test` would have said. */
+                dr::masked(ss.transmittance, hit && !is_null) = 0.f;
+
+                Spectrum tr = bsdf->eval_null_transmission(si, is_null);
+                tr = si.to_world_mueller(tr, si.wi, si.wi);
+                dr::masked(ss.transmittance, is_null) *= tr;
+                dr::masked(ss.crossings, is_null) += 1;
+
+                /* `>` and not `>=`, unlike the main path's budget test: there the counter
+                   is compared after incrementing and trips a `stop_next` that still lets
+                   the NEXT surface be reached, so a budget of D buys D crossings. A shadow
+                   ray has no such grace -- blocked is blocked -- so spelling it `>` is what
+                   makes the two agree on the number of panes light gets through. */
+                Mask budget_out = false;
+                if (m_transparent_max_depth >= 0)
+                    budget_out = is_null &&
+                                 ss.crossings > (uint32_t) m_transparent_max_depth;
+                dr::masked(ss.transmittance, budget_out) = 0.f;
+
+                /* Re-aim at the emitter rather than re-using the direction: `spawn_ray_to`
+                   recomputes `maxt`, so the march cannot overshoot the light. */
+                dr::masked(ss.ray, is_null) = si.spawn_ray_to(target);
+
+                ss.active = is_null && !budget_out &&
+                            dr::any(unpolarized_spectrum(ss.transmittance) != 0.f);
+            },
+            "Path integrator transparent shadow ray");
+
+        return ss.transmittance;
+    }
 
     /// Compute a multiple importance sampling weight using the power heuristic
     Float mis_weight(Float pdf_a, Float pdf_b) const {

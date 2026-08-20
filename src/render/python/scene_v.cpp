@@ -76,6 +76,10 @@ MI_PY_EXPORT(Scene) {
              "to `ray_type` does not occlude.")
         .def("has_ray_visibility_masks", &Scene::has_ray_visibility_masks,
              "Does any shape in this scene restrict which ray types can see it?")
+        .def("has_null_bsdfs", &Scene::has_null_bsdfs,
+             "Does any shape in this scene carry a pass-through (null) BSDF? Integrators "
+             "use this to decide whether shadow rays must be marched rather than tested "
+             "with a single occlusion query.")
 #if !defined(MI_ENABLE_EMBREE)
         .def("ray_intersect_naive",
             &Scene::ray_intersect_naive,

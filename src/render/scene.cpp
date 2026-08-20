@@ -125,6 +125,25 @@ MI_VARIANT Scene<Float, Spectrum>::Scene(const Properties &props)
         for (const auto &shape : group->shapes())
             m_has_ray_visibility_masks |= shape->has_ray_visibility_mask();
 
+    /* Same question, same one-off answer, for null (pass-through) boundaries. `ray_test`
+       is a pure occlusion query and cannot tell a clear pane from a wall, so an integrator
+       that uses it for shadow rays has to MARCH through null surfaces instead -- see
+       `has_null_bsdfs()`. Answering here keeps that cost off every scene that has none.
+
+       `Shape::bsdf()` is never null (shapes without one get the default diffuse), but the
+       check is written defensively because a shape may be an `instance` whose own BSDF is
+       absent, which is why the group members are walked on their own below. */
+    auto shape_has_null = [](const Shape *shape) {
+        const BSDF *bsdf = shape->bsdf();
+        return bsdf != nullptr && has_flag(bsdf->flags(), BSDFFlags::Null);
+    };
+    m_has_null_bsdfs = false;
+    for (const Shape *shape : m_shapes)
+        m_has_null_bsdfs |= shape_has_null(shape);
+    for (const ShapeGroup *group : m_shapegroups)
+        for (const auto &shape : group->shapes())
+            m_has_null_bsdfs |= shape_has_null(shape.get());
+
     m_shapes_grad_enabled = false;
 }
 
