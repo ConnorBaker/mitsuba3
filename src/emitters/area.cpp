@@ -131,6 +131,11 @@ public:
 
         // 3. Sample spectral component
         SurfaceInteraction3f si(ps, dr::zeros<Wavelength>());
+        /* HSR: the emitted direction, in the local shading frame, so that a radiance
+           texture which DEPENDS on it sees the right one. See the note in
+           `sample_direction`; the `PositionSample` constructor leaves `wi` at zero and
+           `sample_wavelengths` evaluates the texture. */
+        si.wi = local;
         auto [wavelength, wav_weight] =
             sample_wavelengths(si, wavelength_sample, active);
         si.time = time;
@@ -199,6 +204,20 @@ public:
                                         dist_squared / cos_f, 0.f);
         }
 
+        /* HSR: `wi` -- the direction this surface point emits IN, in its own shading frame.
+           Both constructions above leave it at ZERO: the `PositionSample` constructor
+           initialises `wi(0)` explicitly, and `eval_parameterization` never sets it. That is
+           invisible to an ordinary texture, which reads `si.uv`, but a radiance texture whose
+           value DEPENDS on the emitted direction then gets asked about the zero vector.
+           `eval()` below is the only path that ever supplied a real `wi`, so such a texture
+           worked for rays that happened to hit the emitter and returned zero for every
+           next-event estimation sample -- i.e. it went black in exactly the sampling
+           strategy that carries almost all of the light.
+           Measured with Cycles' area-light SPREAD attenuation, a 45-degree lamp in a closed
+           box: Mitsuba 0.000069 against Cycles 0.085087, a ratio of 0.0008, with Mitsuba's
+           brightest pixel anywhere at 0.00149. `ds.d` points from the receiver TO the
+           emitter, so the emitted direction is its negation. */
+        si.wi = si.to_local(-ds.d);
         UnpolarizedSpectrum spec = m_radiance->eval(si, active) / ds.pdf;
         ds.emitter = this;
         return { ds, depolarizer<Spectrum>(spec) & active };
@@ -242,6 +261,10 @@ public:
         active &= m_two_sided ? (dp != 0.f) : (dp < 0.f);
 
         SurfaceInteraction3f si(ds, it.wavelengths);
+        // HSR: same omission as in `sample_direction` -- see the note there. This is the MIS
+        // half, so leaving it zero made a direction-dependent radiance texture disagree with
+        // itself between the two strategies rather than merely lose energy.
+        si.wi = si.to_local(-ds.d);
         UnpolarizedSpectrum spec = m_radiance->eval(si, active);
         return dr::select(active, depolarizer<Spectrum>(spec), 0.f);
     }
