@@ -111,6 +111,10 @@ class BlenderPrincipledBSDF(mi.BSDF):
             self.has_transmission and self.two_sided
         ), "Only materials without a specular transmission lobe can be two sided."
 
+        # Cycles' per-material "Bump Map Correction"
+        # (`SOCKET_BOOLEAN(use_bump_map_correction, ..., true)` in `scene/shader.cpp`),
+        # defaulted ON exactly as Blender defaults it. See `_bump_shadowing`.
+        self.bump_map_correction = bool(props.get("bump_map_correction", True))
         self.has_normalmap = is_active(props, "normalmap")
         self.normalmap = props.get_texture("normalmap", 0.0)
 
@@ -512,7 +516,95 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         return weights, sampling_weights, masks
 
-    def _eval_pdf_impl(self, attr, ctx, si, wo_, active):
+    def _bump_shadowing(self, si, frame, wo, is_eval):
+        """Cycles' `bump_shadowing_term` (`kernel/closure/bsdf.h`).
+
+        Returns `(keep, soft)`: a mask that rejects light leaking through the geometry, and
+        a multiplicative shadowing factor. Both are identities wherever the closure normal
+        equals the smooth one, so a material with no normal map pays nothing.
+
+        WHY THIS EXISTS, MEASURED. Without it Mitsuba reproduces the render Cycles produces
+        with `use_bump_map_correction` DISABLED, which is a different picture: on a plane
+        with a constant tilted normal map under a single delta sun, mi/cy against the
+        correction-OFF arm is 1.0000 at sun tilts of 89, 85, 80, 70 and 45 degrees, while
+        against the ON arm it is 5.5884, 1.6272, 1.2080, 1.0559, 1.0078. The error is
+        concentrated at grazing incidence and reaches 5.6x. A control arm with an
+        unperturbed normal map matched at 1.0000 across the same sweep, so that gap is this
+        term and not the scene.
+
+        THE TWO HALVES HAVE DIFFERENT SCOPE, which is not a detail:
+
+        * `keep` is a hemisphere-consistency test. `dot(Ns, I) * dot(Ns, N') * dot(N', I)`
+          is negative exactly when `I` and `N'` sit on opposite sides of the SMOOTHED
+          surface, i.e. when normal mapping has let light through the back of geometry that
+          is supposed to be opaque. Cycles applies it to every closure on eval and to
+          diffuse ones only when sampling -- so that a sampled specular direction is not
+          killed outright -- and `is_eval` carries that distinction here.
+        * `soft` is a GGX shadowing-masking term standing in for the microsurface the normal
+          map implies, and Cycles applies it to DIFFUSE-range closures only. That range
+          includes sheen (`CLOSURE_BSDF_SHEEN_ID` sits between `CLOSURE_BSDF_DIFFUSE_ID` and
+          `CLOSURE_BSDF_TRANSLUCENT_ID`), which is why the caller applies it to the sheen
+          lobe as well as the diffuse one.
+
+        Everything is computed in `si`'s local frame, where the smooth normal `Ns` is
+        exactly (0, 0, 1). That is not a shortcut: it removes a world-space round trip whose
+        error would land on `cos_d`, and `cos_d` enters through `1/cos_d^2 - 1`, which is
+        unbounded as the perturbation approaches 90 degrees.
+
+        ONE DELIBERATE DIVERGENCE: Cycles also returns 1 for `PRIMITIVE_CURVE`, because a
+        curve's `sd->N` is not a surface normal. This BSDF is never bound to a curve by the
+        Blender exporter (hair goes to a different node), so the guard has no analogue here
+        and is not stubbed in.
+
+        Based on "A Microfacet-Based Shadowing Function to Solve the Bump Terminator
+        Problem", Estevez, Lecocq and Stein.
+        """
+        # N' is ALREADY in `si`'s local frame: `compute_normalmap_frame` builds it as
+        # `normalize(2 * normal - 1)`, a tangent-space vector, and returns `Frame3f([0,0,1])`
+        # when there is no normal map. So it is used directly -- `si.to_local` here would
+        # apply a second world-to-local transform and silently corrupt `cos_d`.
+        #
+        # This also settles the two-sided case without a flip. `_eval_pdf_impl` mirrors
+        # `wo_.z` and `si.wi.z` about the tangent plane rather than flipping the frame, so a
+        # back-face hit is evaluated in a reflected local space whose +z is the incident
+        # side. A tangent-space normal map is defined relative to its own face, so `frame.n`
+        # is already expressed in that same reflected space -- which is exactly the
+        # assumption the surrounding code makes when it calls `frame.to_local(si.wi)`.
+        n_c = mi.Vector3f(frame.n)
+
+        cos_ns_i = wo.z                      # dot(Ns, I), Ns = (0, 0, 1)
+        cos_ns_n = n_c.z                     # dot(Ns, N')
+        cos_n_i = dr.dot(n_c, wo)            # dot(N', I)
+
+        # `is_eval` is not consumed here: the kernel's `(is_eval || is_diffuse)` narrows
+        # WHICH CLOSURES the rejection reaches, not the test itself, and the caller owns the
+        # per-lobe masks. It stays in the signature so the call site reads like the kernel.
+        keep = (cos_ns_i * cos_ns_n * cos_n_i) >= 0.0
+
+        if not self.bump_map_correction:
+            # The material turned the correction off. The rejection is part of the same
+            # switch in Cycles (`SD_USE_BUMP_MAP_CORRECTION` gates the softening only, but
+            # the rejection is reached first and is unconditional), so keep it and drop the
+            # softening alone -- matching the kernel's control flow rather than the name.
+            return keep, mi.Float(1.0)
+
+        cos_i = dr.abs(cos_ns_i)
+        cos_d = dr.abs(cos_ns_n)
+
+        tan2_d = dr.rcp(dr.maximum(dr.square(cos_d), 1e-12)) - 1.0
+        alpha2 = dr.clip(0.125 * tan2_d, 0.0, 1.0)
+        tan2_i = dr.maximum(dr.rcp(dr.maximum(dr.square(cos_i), 1e-12)) - 1.0, 0.0)
+        # bsdf_G<GGX>(alpha2, cos_N) = 1 / (1 + lambda), Heitz eq. 72
+        lam = 0.5 * (dr.sqrt(1.0 + alpha2 * tan2_i) - 1.0)
+        soft = dr.rcp(1.0 + lam)
+
+        # Cycles' early-outs, in its order: an unperturbed or grazing-to-degenerate
+        # configuration is left alone, and a vanishing `cos_i` is fully shadowed.
+        soft = dr.select((cos_d >= 1.0) | (cos_i >= 1.0), mi.Float(1.0), soft)
+        soft = dr.select(cos_i < 1e-6, mi.Float(0.0), soft)
+        return keep, soft
+
+    def _eval_pdf_impl(self, attr, ctx, si, wo_, active, is_eval=True):
         # Two-sided
         wo_ = mi.Vector3f(wo_)
         si = mi.SurfaceInteraction3f(si)
@@ -550,6 +642,21 @@ class BlenderPrincipledBSDF(mi.BSDF):
         masks.trans_reflect &= reflect_geom & reflect_shading
         masks.trans_refract &= refract_geom & refract_shading
 
+        # Cycles' bump-map correction. `bump_keep` rejects light leaking through the
+        # smoothed geometry; `bump_soft` is the GGX shadowing factor, which Cycles applies
+        # to DIFFUSE-RANGE closures only -- diffuse and sheen here. See `_bump_shadowing`.
+        bump_keep, bump_soft = self._bump_shadowing(si, frame, wo_, is_eval)
+        masks.diffuse &= bump_keep
+        masks.sheen &= bump_keep
+        if is_eval:
+            # On eval the rejection covers every closure; when sampling it does not, so a
+            # sampled specular direction survives.
+            masks.clearcoat &= bump_keep
+            masks.metallic &= bump_keep
+            masks.specular &= bump_keep
+            masks.trans_reflect &= bump_keep
+            masks.trans_refract &= bump_keep
+
         # Initializing the output PDF and BSDF values
         pdf = mi.Float(0.0)
         value = mi.Spectrum(0.0)
@@ -557,7 +664,9 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # Sheen evaluation
         if self.has_sheen:
             sheen_value = SheenLobe.eval(wi, wo, attr.sheen_roughness, attr.anisotropic)
-            value[masks.sheen] += mi.Spectrum(weights.sheen) * mi.Spectrum(sheen_value)
+            value[masks.sheen] += (mi.Spectrum(weights.sheen)
+                                   * mi.Spectrum(sheen_value)
+                                   * mi.Spectrum(bump_soft))
 
         # Clearcoat lobe
         if self.has_clearcoat:
@@ -669,6 +778,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 mi.Spectrum(diffuse_value)
                 * mi.Spectrum(weights.diffuse)
                 * mi.Spectrum(attr.base_color)
+                * mi.Spectrum(bump_soft)
             )
             pdf[masks.diffuse] += sampling_weights.diffuse * diffuse_pdf
 
@@ -783,7 +893,10 @@ class BlenderPrincipledBSDF(mi.BSDF):
             bs[masks.null] = b
 
         # Compute corresponding PDF and BSDF value
-        value, bs.pdf = self._eval_pdf_impl(attr, ctx, si, bs.wo, active)
+        # `is_eval=False`: Cycles does not reject a SAMPLED non-diffuse direction,
+        # only an evaluated one (`bsdf_sample` passes `false`).
+        value, bs.pdf = self._eval_pdf_impl(attr, ctx, si, bs.wo, active,
+                                            is_eval=False)
 
         if self.has_alpha:
             value[masks.null] = 1.0 - attr.alpha

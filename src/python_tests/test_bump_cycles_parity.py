@@ -113,12 +113,20 @@ def _vec3(v):
     return np.array([_f(v.x), _f(v.y), _f(v.z)])
 
 
+def _is_double():
+    """Is the active variant double precision?
+
+    NOT `dr.is_double_v` -- that name does not exist in the pinned Dr.Jit, so the version of
+    this helper that called it inside a try/except was ALWAYS taking the except branch and
+    deciding on the variant STRING. It happened to give the right answer, which is why it
+    survived; `dr.type_v` is the actual query and cannot silently stop working.
+    """
+    return dr.type_v(mi.Float) == dr.VarType.Float64
+
+
 def _tol(single, double):
     """Pick a tolerance for the active variant's precision."""
-    try:
-        return double if dr.is_double_v(mi.Float) else single
-    except Exception:
-        return double if 'double' in mi.variant() else single
+    return double if _is_double() else single
 
 
 def _variant():
