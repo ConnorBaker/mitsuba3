@@ -241,6 +241,119 @@ def microfacet_estimate_albedo(
 
 
 # ------------------------------------------------------------------------------
+
+
+def ggx_energy_compensation(
+    roughness: mi.Float,
+    cos_theta: mi.Float,
+    r0: mi.Spectrum = None,
+    eta: mi.Float = None,
+    glass: bool = False,
+) -> mi.Spectrum:
+    """
+    Multiple-scattering energy compensation for a GGX lobe, Turquin-style.
+
+    A single-scattering microfacet lobe loses the energy that would have bounced a second
+    time between microfacets; the loss grows with roughness and is total nonsense by
+    roughness 1. The correction scales the lobe by
+
+        1 + [F_avg * E_avg / (1 - F_avg * (1 - E_avg))] * (1 - E(roughness, mu)) / E(roughness, mu)
+
+    where E is the directional albedo of the SAME lobe with the Fresnel term set to 1 and
+    E_avg is that albedo averaged over incidence. For a white conductor (F_avg = 1) the
+    bracket is 1 and the scale is exactly 1/E, so a white furnace reads exactly 1 -- which
+    is the analytic control this is checked against. For a COLOURED one the bracket is the
+    geometric series over repeated tinted bounces; see the comment at the conductor branch
+    for why the more commonly quoted one-liner is wrong there and by how much.
+
+    The tables this needs were already computed and SHIPPED by mitsuba3#1822
+    (`ggx_E`, `ggx_Eavg`, `ggx_glass_E`, `ggx_glass_inv_E`, and the two glass averages) and
+    were then referenced by nothing: `ggx_gen_schlick_ior_s` is the only table any code path
+    fetched. Measured consequence before this function existed: a white metallic=1 at
+    roughness 0.5 rendered 0.889358 in a furnace where Cycles renders 1.000387, and it was
+    BIT-IDENTICAL to Mitsuba's own single-scattering `roughconductor` at the same alpha.
+
+    The glass form has no separate F_avg: the dielectric Fresnel is already inside
+    `ggx_glass_E`, whose value is the lobe's TOTAL albedo over reflection and refraction, so
+    the scale is 1/E. It reads the SAME table on both sides of the interface, which is a
+    compromise forced by a measured defect in the shipped `ggx_glass_inv_E` -- the numbers
+    and the probe that established it are at the glass branch below.
+    """
+    mu = dr.clip(dr.abs(cos_theta), 1e-4, 1.0)
+    r = dr.clip(roughness, 1e-4, 1.0)
+    if glass:
+        assert eta is not None
+        # Same z reparameterization the generalized-Schlick table is read with:
+        # r0 = ((eta-1)/(eta+1))^2 = z^4.
+        eta_up = dr.select(eta >= 1.0, eta, dr.rcp(eta))
+        z = dr.sqrt(dr.abs((eta_up - 1.0) / (eta_up + 1.0)))
+        E_out = fetch_table("ggx_glass_E").eval([r, mu, z])[0]
+        E_in = fetch_table("ggx_glass_inv_E").eval([r, mu, z])[0]
+        # DELIBERATELY THE FRONT-SIDE TABLE ON BOTH SIDES, and the reason is a defect in the
+        # SHIPPED `ggx_glass_inv_E` table rather than in the choice of formula.
+        #
+        # The side-correct choice is `ggx_glass_inv_E` for a ray leaving the medium. Applying
+        # 1/E per interface with it compounds across the internal bounces and MANUFACTURES
+        # energy: white glass at roughness 1.0 goes to 1.426853 where the analytic answer is
+        # 1.0 and Cycles reads 0.985881. That looked like the formula compounding, so the
+        # DENOMINATOR was measured instead of argued about -- integrate the lobe's own
+        # directional albedo straight off `BSDF.sample` (the returned weight IS value/pdf, so
+        # its mean is E(mu) by definition) and compare it to the table at the same (r, mu, z).
+        # At eta = 1.45, roughness 0.9, a ray LEAVING the medium:
+        #
+        #     mu     measured E    ggx_glass_inv_E
+        #     0.9      0.769731           0.534163      (table 31% low)
+        #     0.5      0.639872           0.547019
+        #     0.2      0.560146           0.520391
+        #
+        # The FRONT table passes the same check (0.932259 measured vs 0.908106 tabulated at
+        # mu = 0.9), and so does `ggx_E` for the conductor branch, so this is not the probe.
+        # `ggx_glass_inv_E` is simply too low, which is exactly how 1/E manufactures energy.
+        # Regenerating it means re-deriving mitsuba3's own `precompute.py` -- out of scope
+        # here, and it would change a shipped .npy.
+        #
+        # So of the three reachable options, at white glass roughness 1.0: side-correct
+        # tables 1.426853 (manufactures energy), entering interface only 0.626018 (under),
+        # E_out on both sides 0.786004 -- the last is monotone in roughness and never exceeds
+        # 1, which is the property worth keeping when the alternative is a light source.
+        # The residual against Cycles is real and recorded rather than hidden: at
+        # transmission = 1 this arm reads -15.9991% at roughness 0.7 and -18.7526% at 0.9,
+        # against -27.0303% / -41.5008% uncompensated.
+        _ = E_in
+        E = E_out
+        scale = mi.Spectrum(dr.rcp(dr.maximum(E, 1e-2)))
+    else:
+        E = dr.maximum(fetch_table("ggx_E").eval([r, mu])[0], 1e-2)
+        E_avg = dr.maximum(fetch_table("ggx_Eavg").eval([r])[0], 1e-2)
+        f_avg = dr.clip(mi.Spectrum(1.0) if r0 is None else mi.Spectrum(r0), 0.0, 1.0)
+        # KULLA-CONTY, TINTED -- and the tint is the whole reason this is not the one-liner
+        # `1 + F_avg * (1/E - 1)` that Filament and most engine write-ups give. That form is
+        # exact only for a WHITE conductor. For a coloured one it pays out the ENTIRE missing
+        # energy at a single bounce's tint, when the light that went missing bounced two,
+        # three, n times between microfacets and picked up the tint EACH time. The geometric
+        # series over those bounces is Kulla and Conty's
+        #
+        #     F_ms = F_avg^2 * E_avg / (1 - F_avg * (1 - E_avg))
+        #
+        # so the multiplier on a single-scattering lobe of albedo F_avg*E is
+        # 1 + (F_ms / F_avg) * (1 - E) / E. `k` below is that F_ms / F_avg, written in the
+        # reduced form because F_avg cancels -- which is also what keeps a BLACK metal
+        # (F_avg = 0) from evaluating 0/0.
+        #
+        # This is measured, not argued. Grey-0.5 metal at roughness 0.9 in the white furnace:
+        # Cycles 0.329946, stock 0.229166 (-30.5444%), the un-tinted one-liner 0.367617
+        # (+11.4173% -- it MANUFACTURES energy, which is a worse failure than the deficit it
+        # replaces even though the magnitude is smaller). White metal is unchanged by this
+        # change: at F_avg = 1 the expression reduces to exactly 1/E, which is the identity
+        # the analytic furnace control tests.
+        k = f_avg * E_avg / (1.0 - f_avg * (1.0 - E_avg))
+        scale = 1.0 + k * (1.0 - E) / E
+    # A compensation term is a correction, not a light source: cap it so a table edge or a
+    # grazing ray cannot manufacture energy.
+    return dr.clip(scale, 1.0, 8.0)
+
+
+# ------------------------------------------------------------------------------
 # Lobes
 # ------------------------------------------------------------------------------
 

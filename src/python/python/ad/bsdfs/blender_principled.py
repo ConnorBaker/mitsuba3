@@ -384,6 +384,13 @@ class BlenderPrincipledBSDF(mi.BSDF):
             # from the budget and then handed to a lobe with weight zero -- annihilated.
             met_frac = dr.select(masks.metallic, attr.metallic, mi.Float(0.0))
             attenuation = sanitize(attenuation * (1.0 - met_frac))
+            # HSR: multiple-scattering compensation, using the `ggx_E` / `ggx_Eavg` tables
+            # this branch already ships and nothing read. Applied HERE, before
+            # `sampling_weights` is derived from `weights`, so the lobe-selection
+            # probabilities carry the same scale the evaluation does.
+            weights.metallic *= ggx_energy_compensation(
+                attr.roughness, mi.Frame3f.cos_theta(sh_wi), r0=attr.base_color
+            )
 
         # Transmission lobe
         if self.has_transmission:
@@ -405,6 +412,15 @@ class BlenderPrincipledBSDF(mi.BSDF):
                                               weights.trans_refract)
             trans_frac = dr.select(back, mi.Float(1.0), attr.transmission)
             attenuation = sanitize(attenuation * (1.0 - trans_frac))
+            # HSR: multiple-scattering compensation for the glass lobe, from `ggx_glass_E`.
+            # Applied to BOTH halves because that table integrates the reflected and the
+            # refracted albedo together -- they are one lobe as far as the energy is
+            # concerned, and splitting the scale between them would be arbitrary.
+            _ms_glass = ggx_energy_compensation(
+                attr.roughness, mi.Frame3f.cos_theta(sh_wi), eta=attr.eta, glass=True
+            )
+            weights.trans_reflect *= _ms_glass
+            weights.trans_refract *= _ms_glass
 
         # Specular lobe
         if self.has_specular:
