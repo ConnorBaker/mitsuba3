@@ -70,6 +70,20 @@ public:
 
         m_radiance = props.get_emissive_texture<Texture>("radiance", 1.f);
 
+        /* HSR: emit from BOTH faces, as Cycles' emission closure does.
+           Mitsuba's area light is one-sided: `eval` masks on `cos_theta(si.wi) > 0`, so a
+           mesh whose normals point away from the viewer is a light that emits nothing
+           where you are looking. Cycles has no such test -- an Emission closure emits on
+           whichever side the ray arrived from -- and Blender authors rely on it, because
+           nothing in that UI asks you to check your normals before using a mesh as a lamp.
+           Blender's own 4.1 splash scene contains one: `LED strip` has 100% of its face
+           area pointing away from the camera, lights the room correctly through indirect
+           bounces in both renderers, and is simply ABSENT from the direct view here.
+
+           This is off by default, so a scene written for Mitsuba keeps Mitsuba's
+           semantics; it is the Blender importer's job to ask for it. */
+        m_two_sided = props.get<bool>("two_sided", false);
+
         m_flags = +EmitterFlags::Surface;
         if (m_radiance->is_spatially_varying())
             m_flags |= +EmitterFlags::SpatiallyVarying;
@@ -83,8 +97,11 @@ public:
     Spectrum eval(const SurfaceInteraction3f &si, Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::EndpointEvaluate, active);
 
-        auto result = depolarizer<Spectrum>(m_radiance->eval(si, active)) &
-                      (Frame3f::cos_theta(si.wi) > 0.f);
+        Mask visible = Frame3f::cos_theta(si.wi) > 0.f;
+        if (m_two_sided)
+            visible = Mask(true);
+
+        auto result = depolarizer<Spectrum>(m_radiance->eval(si, active)) & visible;
 
         return result;
     }
@@ -98,7 +115,19 @@ public:
         auto [ps, pos_weight] = sample_position(time, sample2, active);
 
         // 2. Sample directional component
-        Vector3f local = warp::square_to_cosine_hemisphere(sample3);
+        /* Two-sided: pick a face first, reusing the sample's second dimension rather
+           than asking for a bit the interface does not offer, then stretch what is left
+           back over [0, 1) so the hemisphere warp still sees a uniform square. Choosing
+           a side halves the directional density, which is why the weight doubles below. */
+        Point2f sample3_ = sample3;
+        Float side = 1.f;
+        if (m_two_sided) {
+            Mask back = sample3_.y() >= 0.5f;
+            sample3_.y() = dr::select(back, 2.f * sample3_.y() - 1.f, 2.f * sample3_.y());
+            side = dr::select(back, Float(-1.f), Float(1.f));
+        }
+        Vector3f local = warp::square_to_cosine_hemisphere(sample3_);
+        local.z() *= side;
 
         // 3. Sample spectral component
         SurfaceInteraction3f si(ps, dr::zeros<Wavelength>());
@@ -109,6 +138,8 @@ public:
 
         // Note: some terms cancelled out with `warp::square_to_cosine_hemisphere_pdf`.
         Spectrum weight = pos_weight * wav_weight * dr::Pi<ScalarFloat>;
+        if (m_two_sided)
+            weight *= 2.f;   // half the directional density -> twice the weight
 
         return { si.spawn_ray(si.to_world(local)),
                  depolarizer<Spectrum>(weight) };
@@ -133,7 +164,12 @@ public:
         if (likely(!m_radiance->is_spatially_varying())) {
             // Texture is uniform, try to importance sample the shape wrt. solid angle at 'it'
             ds = m_shape->sample_direction(it, sample, active);
-            active &= dr::dot(ds.d, ds.n) < 0.f && (ds.pdf != 0.f);
+            /* `Shape::sample_direction` already converts to solid angle through
+               `abs_dot`, so the density is side-agnostic and only the visibility test
+               has to be relaxed here. A grazing sample (dp == 0) still contributes
+               nothing either way. */
+            Float dp = dr::dot(ds.d, ds.n);
+            active &= (m_two_sided ? (dp != 0.f) : (dp < 0.f)) && (ds.pdf != 0.f);
 
             si = SurfaceInteraction3f(ds, it.wavelengths);
         } else {
@@ -157,9 +193,10 @@ public:
             ds.d /= ds.dist;
 
             Float dp = dr::dot(ds.d, ds.n);
-            active &= dp < 0.f;
+            active &= m_two_sided ? (dp != 0.f) : (dp < 0.f);
+            Float cos_f = m_two_sided ? dr::abs(dp) : -dp;
             ds.pdf = dr::select(active, pdf / dr::norm(dr::cross(si.dp_du, si.dp_dv)) *
-                                        dist_squared / -dp, 0.f);
+                                        dist_squared / cos_f, 0.f);
         }
 
         UnpolarizedSpectrum spec = m_radiance->eval(si, active) / ds.pdf;
@@ -171,7 +208,7 @@ public:
                         Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::EndpointEvaluate, active);
         Float dp = dr::dot(ds.d, ds.n);
-        active &= dp < 0.f;
+        active &= m_two_sided ? (dp != 0.f) : (dp < 0.f);
 
         if constexpr (drjit::is_jit_v<Float>) {
             if (!m_shape)
@@ -190,7 +227,8 @@ public:
             active &= si.is_valid();
 
             value = m_radiance->pdf_position(ds.uv, active) * dr::square(ds.dist) /
-                    (dr::norm(dr::cross(si.dp_du, si.dp_dv)) * -dp);
+                    (dr::norm(dr::cross(si.dp_du, si.dp_dv)) *
+                     (m_two_sided ? dr::abs(dp) : -dp));
         }
 
         return dr::select(active, value, 0.f);
@@ -201,7 +239,7 @@ public:
                             Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::EndpointEvaluate, active);
         Float dp = dr::dot(ds.d, ds.n);
-        active &= dp < 0.f;
+        active &= m_two_sided ? (dp != 0.f) : (dp < 0.f);
 
         SurfaceInteraction3f si(ds, it.wavelengths);
         UnpolarizedSpectrum spec = m_radiance->eval(si, active);
@@ -257,6 +295,7 @@ public:
         std::ostringstream oss;
         oss << "AreaLight[" << std::endl
             << "  radiance = " << string::indent(m_radiance) << "," << std::endl
+            << "  two_sided = " << m_two_sided << "," << std::endl
             << "  surface_area = ";
         if (m_shape) oss << m_shape->surface_area();
         else         oss << "  <no shape attached!>";
@@ -270,6 +309,7 @@ public:
     MI_DECLARE_CLASS(AreaLight)
 private:
     ref<Texture> m_radiance;
+    bool m_two_sided = false;
 
     MI_TRAVERSE_CB(Base, m_radiance)
 };
