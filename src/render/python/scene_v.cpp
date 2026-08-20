@@ -71,9 +71,11 @@ MI_PY_EXPORT(Scene) {
              nb::overload_cast<const Ray3f &, Mask, Mask>(&Scene::ray_test, nb::const_),
              "ray"_a, "coherent"_a, "active"_a = true, D(Scene, ray_test, 2))
         .def("ray_test_visible", &Scene::ray_test_visible,
-             "ray"_a, "ray_type"_a, "active"_a = true, D(Scene, ray_test_visible))
+             "ray"_a, "ray_type"_a, "active"_a = true,
+             "Occlusion test that honours per-shape RayVisibility masks: a shape invisible "
+             "to `ray_type` does not occlude.")
         .def("has_ray_visibility_masks", &Scene::has_ray_visibility_masks,
-             D(Scene, has_ray_visibility_masks))
+             "Does any shape in this scene restrict which ray types can see it?")
 #if !defined(MI_ENABLE_EMBREE)
         .def("ray_intersect_naive",
             &Scene::ray_intersect_naive,

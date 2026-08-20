@@ -25,13 +25,21 @@ MI_PY_EXPORT(DiscontinuityFlags) {
         .def_value(ShapeType, EllipsoidsMesh)
         .def_value(ShapeType, Invalid);
 
-    auto ray_visibility = nb::enum_<RayVisibility>(m, "RayVisibility", nb::is_arithmetic(),
-                                                   D(RayVisibility))
-        .def_value(RayVisibility, Camera)
-        .def_value(RayVisibility, Diffuse)
-        .def_value(RayVisibility, Glossy)
-        .def_value(RayVisibility, Transmission)
-        .def_value(RayVisibility, VolumeScatter)
-        .def_value(RayVisibility, Shadow)
-        .def_value(RayVisibility, All);
+    auto ray_visibility = nb::enum_<RayVisibility>(
+            m, "RayVisibility", nb::is_arithmetic(),
+            "Per-shape ray visibility, one bit per ray type (Blender's Object > Visibility > "
+            "Ray Visibility). A shape invisible to a ray type is skipped by rays of that "
+            "type. The default is All.")
+        .value("Camera", RayVisibility::Camera, "Rays leaving the sensor")
+        .value("Diffuse", RayVisibility::Diffuse,
+               "Rays continuing after a diffuse scattering event")
+        .value("Glossy", RayVisibility::Glossy,
+               "Rays continuing after a glossy or specular reflection")
+        .value("Transmission", RayVisibility::Transmission,
+               "Rays continuing after a transmission event")
+        .value("VolumeScatter", RayVisibility::VolumeScatter,
+               "Rays continuing after scattering inside a participating medium")
+        .value("Shadow", RayVisibility::Shadow,
+               "Shadow rays, i.e. the occlusion test of next-event estimation")
+        .value("All", RayVisibility::All, "Visible to every ray type (the default)");
 }

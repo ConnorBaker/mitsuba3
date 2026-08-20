@@ -97,10 +97,10 @@ template <typename Ptr, typename Cls> void bind_shape_generic(Cls &cls) {
             D(Shape, shape_type))
        .def("ray_visibility",
             [](Ptr shape) { return shape->ray_visibility(); },
-            D(Shape, ray_visibility))
+            "Which ray types can see this shape (a mask of RayVisibility bits)")
        .def("has_ray_visibility_mask",
             [](Ptr shape) { return shape->has_ray_visibility_mask(); },
-            D(Shape, has_ray_visibility_mask))
+            "Is this shape invisible to at least one ray type?")
        .def("interior_medium",
             [](Ptr shape) -> RetMedium { return shape->interior_medium(); },
             D(Shape, interior_medium))
