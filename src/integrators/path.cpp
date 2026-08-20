@@ -857,6 +857,17 @@ public:
 
                 Mask hit = ss.active && si.is_valid();
 
+                /* Early exit for scalar mode, and it is not an optimisation: with one lane
+                   and no masking, `si.bsdf()` on an escaped ray dereferences a null shape
+                   and segfaults. The JIT variants trace straight past this (`none_or<false>`
+                   is false at trace time) and rely on the mask instead -- which is why the
+                   GPU arm of the regression suite passed while every `scalar_rgb` case
+                   crashed. Same shape as the guard the main loop already carries. */
+                if (dr::none_or<false>(hit)) {
+                    ss.active = false;
+                    return;
+                }
+
                 BSDFPtr bsdf  = si.bsdf(ray);
                 Mask is_null  = hit && has_flag(bsdf->flags(), BSDFFlags::Null);
 
