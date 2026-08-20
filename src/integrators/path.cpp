@@ -157,6 +157,21 @@ public:
                                                  : clamp_indirect * 3.f;
         m_clamp_enabled  = clamp_direct != 0.f || clamp_indirect != 0.f;
 
+        /* Cycles' "filter glossy" (Blender UI: Sampling > Advanced > Filter Glossy,
+           `cycles.blur_glossy`, factory default 1.0). Taken here in the UI's units and
+           inverted the way Cycles does in `scene/integrator.cpp`:
+             kintegrator->filter_glossy = (filter_glossy == 0.0f) ? FLT_MAX
+                                                                  : 1.0f / filter_glossy;
+           Zero disables it, which is also this plugin's default -- so a scene that does
+           not ask for it renders exactly as it did before. */
+        ScalarFloat blur_glossy = props.get<ScalarFloat>("blur_glossy", 0.f);
+        if (blur_glossy < 0.f)
+            Throw("PathIntegrator: blur_glossy must be non-negative (0 disables filter "
+                  "glossy); got %f", blur_glossy);
+        m_filter_glossy_enabled = blur_glossy != 0.f;
+        m_filter_glossy = m_filter_glossy_enabled ? 1.f / blur_glossy
+                                                  : dr::Infinity<ScalarFloat>;
+
         m_diffuse_max_depth      = props.get<int>("diffuse_max_depth", -1);
         m_glossy_max_depth       = props.get<int>("glossy_max_depth", -1);
         m_transmission_max_depth = props.get<int>("transmission_max_depth", -1);
@@ -200,6 +215,10 @@ public:
         Interaction3f prev_si         = dr::zeros<Interaction3f>();
         Float         prev_bsdf_pdf   = 1.f;
         Bool          prev_bsdf_delta = true;
+        /* Smallest BSDF sampling density along the path so far -- Cycles'
+           `INTEGRATOR_STATE(state, path, min_ray_pdf)`, initialised to FLT_MAX in
+           `kernel/integrator/path_state.h`. Only read when filter glossy is enabled. */
+        Float         min_ray_pdf     = dr::Infinity<Float>;
         BSDFContext   bsdf_ctx;
 
         /* Set up a Dr.Jit loop. This optimizes away to a normal loop in scalar
@@ -224,12 +243,13 @@ public:
             Interaction3f prev_si;
             Float prev_bsdf_pdf;
             Bool prev_bsdf_delta;
+            Float min_ray_pdf;
             Bool active;
             Sampler* sampler;
 
             DRJIT_STRUCT(LoopState, ray, pi, throughput, result, eta, depth, \
                 null_depth, diffuse_depth, glossy_depth, transmission_depth, stop_next,
-                valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta,
+                valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta, min_ray_pdf,
                 active, sampler)
         } ls = {
             ray,
@@ -247,6 +267,7 @@ public:
             prev_si,
             prev_bsdf_pdf,
             prev_bsdf_delta,
+            min_ray_pdf,
             active,
             sampler
         };
@@ -302,6 +323,23 @@ public:
             // Fill out all information of the interaction
             SurfaceInteraction3f si =
                 ls.pi.compute_surface_interaction(ls.ray, +RayFlags::All);
+
+            /* Filter glossy: hand this shade point the roughness floor implied by how
+               improbable the path that reached it was. Cycles does the same thing at the
+               same moment, in `surface_shader_prepare_closures`
+               (`kernel/integrator/surface_shader.h`), except that it MUTATES the closures
+               it has just allocated -- which a Mitsuba BSDF plugin, being a shared
+               immutable object, cannot do. Carrying the floor on the interaction instead
+               puts it exactly where every `eval` / `sample` / `pdf` already looks.
+
+               `min_ray_pdf` starts at infinity, so `blur_pdf` is infinite on the first
+               vertex and the branch below leaves `min_alpha` at zero -- a camera-visible
+               surface is never blurred, matching Cycles. */
+            if (m_filter_glossy_enabled) {
+                Float blur_pdf = m_filter_glossy * ls.min_ray_pdf;
+                si.min_alpha = dr::select(blur_pdf < 1.f,
+                                          dr::sqrt(1.f - blur_pdf) * 0.5f, Float(0.f));
+            }
 
             // ---------------------- Direct emission ----------------------
 
@@ -441,6 +479,17 @@ public:
             ls.prev_si = Interaction3f(si);
             ls.prev_bsdf_pdf = bsdf_sample.pdf;
             ls.prev_bsdf_delta = has_flag(bsdf_sample.sampled_type, BSDFFlags::Delta);
+
+            /* Cycles: `if (!(label & LABEL_TRANSPARENT)) min_ray_pdf = fminf(
+                 unguided_bsdf_pdf, min_ray_pdf);` (`kernel/integrator/shade_surface.h`).
+               A pass-through is not a scattering event and must not tighten the bound --
+               otherwise a stack of transparent surfaces would blur everything behind it. */
+            if (m_filter_glossy_enabled) {
+                Mask scattered = ls.active &&
+                    !has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
+                dr::masked(ls.min_ray_pdf, scattered) =
+                    dr::minimum(bsdf_sample.pdf, ls.min_ray_pdf);
+            }
 
             // -------------------- Stopping criterion ---------------------
 
@@ -594,6 +643,9 @@ public:
     ScalarFloat m_clamp_direct   = dr::Infinity<ScalarFloat>;
     ScalarFloat m_clamp_indirect = dr::Infinity<ScalarFloat>;
     bool m_clamp_enabled = false;
+    /// Cycles' `filter_glossy`, already inverted (1 / the UI's `blur_glossy`).
+    ScalarFloat m_filter_glossy = dr::Infinity<ScalarFloat>;
+    bool m_filter_glossy_enabled = false;
     int m_diffuse_max_depth = -1;
     int m_glossy_max_depth = -1;
     int m_transmission_max_depth = -1;

@@ -214,6 +214,10 @@ class BlenderPrincipledBSDF(mi.BSDF):
         Fetch BSDF attributes for the current surface interaction
         """
         attr = dotdict()
+        # Cycles' "filter glossy" floor for this shade point, set by the integrator.
+        # Zero on any interaction the integrator did not touch, which makes every lobe
+        # below identical to what it was.
+        attr.min_alpha = si.min_alpha
         attr.diffuse_roughness = self.diffuse_roughness.eval_1(si, active)
         attr.diffuse = 1.0
         attr.base_color = self.base_color.eval(si, active)
@@ -544,6 +548,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 wo,
                 reflection=True,
                 roughness=attr.clearcoat_roughness,
+                min_alpha=attr.min_alpha,
                 fresnel_mode=MicrofacetFresnel.DIELECTRIC,
                 eta=attr.clearcoat_ior,
                 anisotropic=0.0,
@@ -562,6 +567,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 wo,
                 reflection=True,
                 roughness=attr.roughness,
+                min_alpha=attr.min_alpha,
                 anisotropic=attr.anisotropic,
                 fresnel_mode=MicrofacetFresnel.APPROXIMATED_SCHLICK,
                 r0=attr.base_color,
@@ -581,6 +587,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 wo,
                 reflection=True,
                 roughness=attr.roughness,
+                min_alpha=attr.min_alpha,
                 anisotropic=attr.anisotropic,
                 fresnel_mode=MicrofacetFresnel.GENERALIZED_SCHLICK,
                 eta=attr.eta,
@@ -597,6 +604,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 wo,
                 reflection=False,
                 roughness=attr.roughness,
+                min_alpha=attr.min_alpha,
                 anisotropic=attr.anisotropic,
                 fresnel_mode=MicrofacetFresnel.GENERALIZED_SCHLICK,
                 eta=attr.eta,
@@ -622,6 +630,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 wo,
                 reflection=True,
                 roughness=attr.roughness,
+                min_alpha=attr.min_alpha,
                 anisotropic=attr.anisotropic,
                 fresnel_mode=MicrofacetFresnel.GENERALIZED_SCHLICK,
                 r0=spec_r0,
@@ -666,7 +675,9 @@ class BlenderPrincipledBSDF(mi.BSDF):
         wi = frame.to_local(si.wi)
 
         # Sample main specular and transmission reflection distribution
-        wh = MicrofacetLobe.sample_wh(wi, sample2, attr.roughness, attr.anisotropic)
+        wh = MicrofacetLobe.sample_wh(
+            wi, sample2, attr.roughness, attr.anisotropic, min_alpha=attr.min_alpha
+        )
 
         # Apply normalmap for clearcoat lobe
         cc_frame = compute_normalmap_frame(si, normal=attr.clearcoat_normal)
@@ -707,7 +718,9 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         # Clearcoat reflection sampling
         if self.has_clearcoat:
-            cc_wh = MicrofacetLobe.sample_wh(cc_wi, sample2, attr.clearcoat_roughness)
+            cc_wh = MicrofacetLobe.sample_wh(
+                cc_wi, sample2, attr.clearcoat_roughness, min_alpha=attr.min_alpha
+            )
             b = dr.zeros(mi.BSDFSample3f)
             b.wo = frame.to_world(microfacet_reflect(cc_wi, cc_wh))
             b.sampled_component = self.components_mapping.clearcoat

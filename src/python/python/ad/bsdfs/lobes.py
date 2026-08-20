@@ -150,15 +150,22 @@ def microfacet_fresnel(
 
 
 def microfacet_compute_alphas(
-    roughness: mi.Float, anisotropic: mi.Float
+    roughness: mi.Float, anisotropic: mi.Float, min_alpha: mi.Float = 0.0
 ) -> Tuple[mi.Float, mi.Float]:
     """
     Calculates the microfacet distribution parameters based on Disney Course Notes
+
+    `min_alpha` is Cycles' "filter glossy" roughness floor, carried on the surface
+    interaction (see `SurfaceInteraction.min_alpha`). It is applied to the FINAL alphas
+    rather than to `roughness`, because that is where Cycles applies it:
+    `bsdf_microfacet_blur` sets `alpha_x = max(roughness, alpha_x)` and likewise for
+    `alpha_y`, i.e. AFTER the anisotropic aspect split. Clamping `roughness` instead
+    would leave the two axes floored at different values. Zero is the identity.
     """
     roughness_2 = dr.square(roughness)
     aspect = dr.sqrt(1.0 - 0.9 * anisotropic)
-    return dr.maximum(1e-4, roughness_2 / aspect), dr.maximum(
-        1e-4, roughness_2 * aspect
+    return dr.maximum(dr.maximum(1e-4, min_alpha), roughness_2 / aspect), dr.maximum(
+        dr.maximum(1e-4, min_alpha), roughness_2 * aspect
     )
 
 
@@ -603,9 +610,10 @@ class MicrofacetLobe:
         has_birefringence: bool = False,
         fast_axis: mi.Float = None,
         retardance: mi.Float = None,
+        min_alpha: mi.Float = 0.0,
     ) -> Tuple[mi.Spectrum, mi.Float]:
         # Compute microfacet parameters and instantiate microfacet model
-        ax, ay = microfacet_compute_alphas(roughness, anisotropic)
+        ax, ay = microfacet_compute_alphas(roughness, anisotropic, min_alpha)
         distr = mi.MicrofacetDistribution(m_type, ax, ay)
 
         # Eta w.r.t. path
@@ -669,11 +677,12 @@ class MicrofacetLobe:
         roughness: mi.Float,
         anisotropic: mi.Float = 0.0,
         m_type=mi.MicrofacetType.GGX,
+        min_alpha: mi.Float = 0.0,
     ) -> mi.Vector3f:
         """
         Sample half-vector direction from microfacet model
         """
-        ax, ay = microfacet_compute_alphas(roughness, anisotropic)
+        ax, ay = microfacet_compute_alphas(roughness, anisotropic, min_alpha)
         distr = mi.MicrofacetDistribution(m_type, ax, ay)
         return distr.sample(dr.mulsign(wi, mi.Frame3f.cos_theta(wi)), sample2)[0]
 

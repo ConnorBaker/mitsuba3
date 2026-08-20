@@ -259,8 +259,8 @@ public:
 
         /* Construct the microfacet distribution matching the roughness values at the current surface position. */
         MicrofacetDistribution distr(m_type,
-                                     m_alpha_u->eval_1(si, active),
-                                     m_alpha_v->eval_1(si, active),
+                                     filter_glossy_alpha(m_alpha_u->eval_1(si, active), si),
+                                     filter_glossy_alpha(m_alpha_v->eval_1(si, active), si),
                                      m_sample_visible);
 
         /* Trick by Walter et al.: slightly scale the roughness values to
@@ -386,8 +386,8 @@ public:
         /* Construct the microfacet distribution matching the
            roughness values at the current surface position. */
         MicrofacetDistribution distr(m_type,
-                                     m_alpha_u->eval_1(si, active),
-                                     m_alpha_v->eval_1(si, active),
+                                     filter_glossy_alpha(m_alpha_u->eval_1(si, active), si),
+                                     filter_glossy_alpha(m_alpha_v->eval_1(si, active), si),
                                      m_sample_visible);
 
         // Evaluate the microfacet normal distribution
@@ -476,8 +476,8 @@ public:
            roughness values at the current surface position. */
         MicrofacetDistribution sample_distr(
             m_type,
-            m_alpha_u->eval_1(si, active),
-            m_alpha_v->eval_1(si, active),
+            filter_glossy_alpha(m_alpha_u->eval_1(si, active), si),
+            filter_glossy_alpha(m_alpha_v->eval_1(si, active), si),
             m_sample_visible
         );
 
@@ -542,8 +542,8 @@ public:
         /* Construct the microfacet distribution matching the
            roughness values at the current surface position. */
         MicrofacetDistribution distr(m_type,
-                                     m_alpha_u->eval_1(si, active),
-                                     m_alpha_v->eval_1(si, active),
+                                     filter_glossy_alpha(m_alpha_u->eval_1(si, active), si),
+                                     filter_glossy_alpha(m_alpha_v->eval_1(si, active), si),
                                      m_sample_visible);
 
         // Evaluate the microfacet normal distribution
