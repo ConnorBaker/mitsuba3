@@ -423,13 +423,17 @@ public:
                 dr::masked(ls.depth, at_surface) += 1;
             }
 
+            Mask charged_null = at_surface && lobe_null;
+            Mask charged_transmission = false, charged_diffuse = false,
+                 charged_glossy = false;
             if (m_lobe_budgets) {
                 Mask scattered = at_surface && !lobe_null;
-                dr::masked(ls.transmission_depth, scattered && lobe_transmit) += 1;
-                dr::masked(ls.diffuse_depth,
-                           scattered && !lobe_transmit && lobe_diffuse) += 1;
-                dr::masked(ls.glossy_depth,
-                           scattered && !lobe_transmit && !lobe_diffuse) += 1;
+                charged_transmission = scattered && lobe_transmit;
+                charged_diffuse      = scattered && !lobe_transmit && lobe_diffuse;
+                charged_glossy       = scattered && !lobe_transmit && !lobe_diffuse;
+                dr::masked(ls.transmission_depth, charged_transmission) += 1;
+                dr::masked(ls.diffuse_depth, charged_diffuse) += 1;
+                dr::masked(ls.glossy_depth, charged_glossy) += 1;
             }
 
             Float throughput_max = dr::max(unpolarized_spectrum(ls.throughput));
@@ -459,15 +463,26 @@ public:
             if (m_lobe_budgets) {
                 ls.active &= !ls.stop_next;
 
+                /* Each comparison is gated on having just CHARGED that counter, which is
+                   not decoration -- it is where Cycles puts it. There the test lives inside
+                   the branch that did the increment, so a budget can only ever be tripped by
+                   a bounce of its own kind. Comparing the counters unconditionally instead
+                   reads `glossy_depth >= 0` as exhausted in a scene with no glossy lobe at
+                   all, and a budget of 0 would kill every path at the first vertex. */
                 Mask exhausted = false;
                 if (m_transparent_max_depth >= 0)
-                    exhausted |= ls.null_depth >= (uint32_t) m_transparent_max_depth;
+                    exhausted |= charged_null &&
+                                 ls.null_depth >= (uint32_t) m_transparent_max_depth;
                 if (m_diffuse_max_depth >= 0)
-                    exhausted |= ls.diffuse_depth >= (uint32_t) m_diffuse_max_depth;
+                    exhausted |= charged_diffuse &&
+                                 ls.diffuse_depth >= (uint32_t) m_diffuse_max_depth;
                 if (m_glossy_max_depth >= 0)
-                    exhausted |= ls.glossy_depth >= (uint32_t) m_glossy_max_depth;
+                    exhausted |= charged_glossy &&
+                                 ls.glossy_depth >= (uint32_t) m_glossy_max_depth;
                 if (m_transmission_max_depth >= 0)
-                    exhausted |= ls.transmission_depth >= (uint32_t) m_transmission_max_depth;
+                    exhausted |= charged_transmission &&
+                                 ls.transmission_depth >=
+                                     (uint32_t) m_transmission_max_depth;
 
                 ls.stop_next |= exhausted;
             }
