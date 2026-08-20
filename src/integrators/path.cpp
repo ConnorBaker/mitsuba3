@@ -485,7 +485,11 @@ public:
                A pass-through is not a scattering event and must not tighten the bound --
                otherwise a stack of transparent surfaces would blur everything behind it. */
             if (m_filter_glossy_enabled) {
-                Mask scattered = ls.active &&
+                /* `si.is_valid()` matters as much as the Null test: a ray that ESCAPED
+                   has `bsdf_sample.pdf == 0`, and `min(0, min_ray_pdf)` pins the bound to
+                   zero, which is the MAXIMUM blur. Cycles cannot hit this because it only
+                   reaches the update after a real surface hit. */
+                Mask scattered = ls.active && si.is_valid() &&
                     !has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
                 dr::masked(ls.min_ray_pdf, scattered) =
                     dr::minimum(bsdf_sample.pdf, ls.min_ray_pdf);
