@@ -66,13 +66,18 @@ def _camera_scene(occluder_props):
     The light sits below the occluder plane, so no shadow ray ever reaches the occluder and
     the floor is lit in both arms; the only thing the flag can change is what primary rays
     see.
+
+    The slab is deliberately WIDER than the floor. It has to be: the camera looks down at an
+    angle, so the steepest rays in the frame cross the occluder plane further out than the
+    shallowest ones, and a slab merely as wide as the floor lets the bottom of the frame see
+    past its near edge -- which is 12% of the pixels, lit, in a frame the test wants black.
     """
     d = _base()
     d['light'] = {'type': 'point', 'position': [0, 0, 0.5],
                   'intensity': {'type': 'rgb', 'value': [50, 50, 50]}}
     occluder = {
         'type': 'rectangle',
-        'to_world': mi.ScalarTransform4f().translate([0, 0, 1]).scale(4.0),
+        'to_world': mi.ScalarTransform4f().translate([0, 0, 1]).scale(12.0),
         'bsdf': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [0, 0, 0]}},
     }
     occluder.update(occluder_props)
@@ -80,8 +85,23 @@ def _camera_scene(occluder_props):
     return mi.load_dict(d)
 
 
+def _camera_scene_without_occluder():
+    """The same scene with the slab simply absent -- the value `visible_camera=False` must hit.
+
+    Asserting only 'the image got brighter' would pass for a flag that made the slab merely
+    grey. This pins the target.
+    """
+    d = _base()
+    d['light'] = {'type': 'point', 'position': [0, 0, 0.5],
+                  'intensity': {'type': 'rgb', 'value': [50, 50, 50]}}
+    return mi.load_dict(d)
+
+
 def _mean(scene, spp=128):
-    return float(dr.mean(mi.TensorXf(mi.render(scene, spp=spp)).array, axis=None)[0])
+    # dr.mean returns a plain Python float in the scalar variants and a 1-element array in
+    # the JIT ones; go through numpy so the test reads the same number either way.
+    import numpy as np
+    return float(np.asarray(mi.render(scene, spp=spp)).mean())
 
 
 def test01_default_is_all(variant_scalar_rgb):
@@ -132,11 +152,21 @@ def test04_shadow_switch_does_not_move_the_others(variants_all_rgb):
 
 def test05_camera_visibility_hides_only_primary_rays(variants_all_rgb):
     opaque      = _mean(_camera_scene({}))
-    see_through = _mean(_camera_scene({'visible_camera': False}))
+    see_through = _mean(_camera_scene({'visible_camera': False}), spp=512)
+    absent      = _mean(_camera_scene_without_occluder(), spp=512)
 
-    # The slab's lit side faces away from the camera, so with it visible the frame is black.
+    # The slab is black and its lit side faces away, so with it visible the frame is black.
     assert opaque < 1e-4, opaque
-    assert see_through > 0.05, see_through
+    # And with the flag cleared the camera must see what it sees with no slab at ALL -- not
+    # merely more than before, which would also pass for a flag that made the slab grey.
+    #
+    # The two are not bit-identical and should not be asserted to be: the slab is still THERE
+    # for scattered rays, so a path that bounces off the floor into it samples a BSDF and
+    # consumes random numbers the occluder-free scene never draws. Both arms are the same
+    # unbiased estimator on streams that diverge after the first bounce, so the agreement is
+    # Monte-Carlo agreement and the tolerance is a Monte-Carlo tolerance.
+    assert absent > 0.05, absent
+    assert see_through == pytest.approx(absent, rel=5e-3), (see_through, absent)
 
 
 def test06_declaring_an_unused_type_changes_nothing(variants_all_rgb):
