@@ -5,6 +5,48 @@ import drjit as dr
 import mitsuba as mi
 
 CHANNELS = ('UV', 'Object', 'Generated', 'Normal')
+OBJECT_SPACE = ('Object', 'Generated', 'Normal')
+
+
+def _rows(value):
+    """A 4x4 as a list of Python float ROWS, from a transform, a matrix or a nested list."""
+    if value is None:
+        return [[1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+    if isinstance(value, (list, tuple)):
+        return [[float(value[i][j]) for j in range(4)] for i in range(4)]
+    m = getattr(value, 'matrix', value)
+    try:
+        return [[float(m[i][j]) for j in range(4)] for i in range(4)]
+    except Exception:
+        return [[float(m[j][i]) for j in range(4)] for i in range(4)]
+
+
+def _invert(rows):
+    """Gauss-Jordan on a 4x4 of Python floats. Small, exact enough, and no dependency on a
+    transform class whose inverse would have to round-trip through a type we cannot name."""
+    a = [list(rows[i]) + [1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+    for col in range(4):
+        piv = max(range(col, 4), key=lambda r: abs(a[r][col]))
+        if abs(a[piv][col]) < 1e-20:
+            raise ValueError('TextureCoordinate: to_object is singular')
+        a[col], a[piv] = a[piv], a[col]
+        d = a[col][col]
+        a[col] = [v / d for v in a[col]]
+        for r in range(4):
+            if r == col:
+                continue
+            f = a[r][col]
+            if f:
+                a[r] = [v - f * w for v, w in zip(a[r], a[col])]
+    return [row[4:] for row in a]
+
+
+def _vec3(value, default):
+    if value is None:
+        return mi.Vector3f(default)
+    if isinstance(value, (list, tuple)):
+        return mi.Vector3f(float(value[0]), float(value[1]), float(value[2]))
+    return mi.Vector3f(float(value[0]), float(value[1]), float(value[2]))
 
 
 class TextureCoordinate(mi.Texture):
@@ -38,19 +80,27 @@ class TextureCoordinate(mi.Texture):
         if self.channel not in CHANNELS:
             raise ValueError(f"TextureCoordinate: Invalid channel {self.channel}; "
                              f"supported: {', '.join(CHANNELS)}")
-        self.to_object = mi.Transform4f(props.get('to_object', mi.ScalarTransform4f()))
-        self.to_world = self.to_object.inverse()
-        self.gen_min = mi.Vector3f(props.get('generated_min', mi.ScalarPoint3f(0.0)))
-        self.gen_size = mi.Vector3f(props.get('generated_size', mi.ScalarPoint3f(1.0)))
+        # Read as PLAIN FLOATS and rebuild. `props.get` hands back whatever precision and
+        # transform class the caller happened to construct (a ScalarAffineTransform4d, in
+        # practice), and `Transform4f` accepts none of them -- so the conversion is done
+        # here, once, rather than depending on which overload the caller's type matches.
+        raw = props.get('to_object', None) if self.channel in OBJECT_SPACE else None
+        rows = _rows(raw)
+        self.to_object = mi.Transform4f(rows)
+        # The object -> world matrix, kept as Python floats: a NORMAL transforms by the
+        # inverse transpose, which going world -> object is exactly this matrix transposed,
+        # and doing the transpose on scalars avoids depending on whether drjit's Matrix4f
+        # indexes rows or columns.
+        self.o2w = _rows(_invert(rows))
+        self.gen_min = _vec3(props.get('generated_min', None), 0.0)
+        self.gen_size = _vec3(props.get('generated_size', None), 1.0)
 
     def _eval_channel(self, si, active):
         if self.channel == 'UV':
             return mi.Vector3f(si.uv.x, 1.0-si.uv.y, 0.0) # Follow Blender's convention
         if self.channel == 'Normal':
             n = mi.Vector3f(si.n)
-            m = self.to_world.matrix
-            # to_world^T * n -- a normal transforms by the inverse transpose, and going
-            # world -> object that is the TRANSPOSE of the object -> world matrix.
+            m = self.o2w
             out = mi.Vector3f(m[0][0] * n.x + m[1][0] * n.y + m[2][0] * n.z,
                               m[0][1] * n.x + m[1][1] * n.y + m[2][1] * n.z,
                               m[0][2] * n.x + m[1][2] * n.y + m[2][2] * n.z)
