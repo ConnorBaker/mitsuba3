@@ -159,12 +159,21 @@ public:
         };
 
         // First bounce is usually coherent - don't reorder threads
-        ls.pi = scene->ray_intersect_preliminary(ls.ray,
-                                                 /* coherent = */ true,
-                                                 /* reorder = */ false,
-                                                 /* reorder_hint = */ 0,
-                                                 /* reorder_hint_bits = */ 0,
-                                                 ls.active);
+        if (unlikely(scene->has_ray_visibility_masks())) {
+            // Blender-style per-object ray visibility (\ref RayVisibility): skip the shapes
+            // the CAMERA cannot see. The ray comes back advanced past them, because `pi.t`
+            // is measured along whichever ray the backend was finally handed.
+            std::tie(ls.pi, ls.ray) = scene->ray_intersect_preliminary_visible(
+                ls.ray, UInt32((uint32_t) RayVisibility::Camera),
+                /* coherent = */ true, ls.active);
+        } else {
+            ls.pi = scene->ray_intersect_preliminary(ls.ray,
+                                                     /* coherent = */ true,
+                                                     /* reorder = */ false,
+                                                     /* reorder_hint = */ 0,
+                                                     /* reorder_hint_bits = */ 0,
+                                                     ls.active);
+        }
 
         // ---------------------- Hide area emitters ----------------------
 
@@ -330,6 +339,25 @@ public:
             ls.active = active_next && (!rr_active || rr_continue) &&
                         (throughput_max != 0.f);
 
+            if (unlikely(scene->has_ray_visibility_masks())) {
+                /* Blender-style per-object ray visibility (\ref RayVisibility). Which switch
+                   the continuation answers to is decided by the lobe that was just sampled,
+                   which is Blender's own division: a transmitted ray is a transmission ray
+                   whether the lobe was rough or smooth, and everything that is not diffuse --
+                   including a Delta specular lobe -- counts as glossy. The type therefore
+                   varies per lane, which is why it is a `UInt32` rather than a constant. */
+                Mask is_transmission =
+                    has_flag(bsdf_sample.sampled_type, BSDFFlags::Transmission);
+                Mask is_diffuse = has_flag(bsdf_sample.sampled_type, BSDFFlags::Diffuse);
+
+                UInt32 next_type = dr::select(
+                    is_transmission, UInt32((uint32_t) RayVisibility::Transmission),
+                    dr::select(is_diffuse, UInt32((uint32_t) RayVisibility::Diffuse),
+                               UInt32((uint32_t) RayVisibility::Glossy)));
+
+                std::tie(ls.pi, ls.ray) = scene->ray_intersect_preliminary_visible(
+                    ls.ray, next_type, /* coherent = */ false, ls.active);
+            } else {
             // Reorder threads based on the shape they hit
             ls.pi = scene->ray_intersect_preliminary(ls.ray,
                                                      /* coherent = */ false,
@@ -337,6 +365,7 @@ public:
                                                      /* reorder_hint = */ 0,
                                                      /* reorder_hint_bits = */ 0,
                                                      ls.active);
+            }
         });
 
         return {

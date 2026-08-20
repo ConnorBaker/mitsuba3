@@ -89,6 +89,52 @@ enum class ShapeType : uint32_t {
 
 MI_DECLARE_ENUM_OPERATORS(ShapeType)
 
+/**
+ * \brief Per-shape RAY VISIBILITY: one bit per ray type.
+ *
+ * Blender gives every object a set of ray-visibility switches (Object > Visibility > Ray
+ * Visibility), and Cycles implements them as per-object ``PATH_RAY_*`` bits tested during
+ * BVH traversal: an object with a bit cleared is simply NOT THERE for rays of that type.
+ * They are load-bearing in real scenes -- a window pane that occludes the camera but not
+ * shadow rays, a bounce card that lights the subject without appearing in frame -- and
+ * Mitsuba has had no equivalent, so a scene converted from Blender silently rendered
+ * something else.
+ *
+ * The bits mirror Cycles' own set (``intern/cycles/kernel/types.h``), and \ref
+ * RayVisibility::All is the default, under which every code path below reduces EXACTLY to
+ * the unmasked one -- an existing scene cannot change behaviour by adding this enum.
+ *
+ * Note that the mask lives on the \ref Shape rather than on the acceleration structure.
+ * Embree's ray masks need a build-time flag and OptiX's ``visibilityMask`` is only 8 bits
+ * wide and is set by Dr.Jit rather than by us, so filtering is done by the SCENE: a ray that
+ * hits a shape it cannot see is re-spawned past it. That costs one extra traversal step per
+ * ignored hit and nothing at all when no shape in the scene carries a mask.
+ */
+enum class RayVisibility : uint32_t {
+    /// Rays leaving the sensor
+    Camera = 1u << 0,
+
+    /// Rays continuing after a diffuse scattering event
+    Diffuse = 1u << 1,
+
+    /// Rays continuing after a glossy/specular reflection
+    Glossy = 1u << 2,
+
+    /// Rays continuing after a transmission event
+    Transmission = 1u << 3,
+
+    /// Rays continuing after a scattering event inside a participating medium
+    VolumeScatter = 1u << 4,
+
+    /// Shadow rays, i.e. the occlusion test of next-event estimation
+    Shadow = 1u << 5,
+
+    /// Visible to every ray type -- the default, and Mitsuba's historical behaviour
+    All = (1u << 6) - 1u
+};
+
+MI_DECLARE_ENUM_OPERATORS(RayVisibility)
+
 template <typename Float_, typename Spectrum_> struct RenderAliases {
     using Float                     = Float_;
     using Spectrum                  = Spectrum_;

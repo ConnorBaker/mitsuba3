@@ -816,6 +816,19 @@ public:
     /// Returns the shape type \ref ShapeType of this shape
     uint32_t shape_type() const { return (uint32_t) m_shape_type; }
 
+    /**
+     * \brief Which ray types can see this shape (a mask of \ref RayVisibility bits)
+     *
+     * Defaults to \ref RayVisibility::All, i.e. visible to everything, which is what every
+     * shape that does not set the corresponding properties reports.
+     */
+    uint32_t ray_visibility() const { return m_ray_visibility; }
+
+    /// Is this shape invisible to at least one ray type?
+    bool has_ray_visibility_mask() const {
+        return m_ray_visibility != (uint32_t) RayVisibility::All;
+    }
+
     /// Is this shape a shape group?
     bool is_shape_group() const { return (shape_type() == +ShapeType::ShapeGroup); };
 
@@ -948,6 +961,9 @@ protected:
     ref<Medium> m_interior_medium;
     ref<Medium> m_exterior_medium;
     ShapeType m_shape_type = ShapeType::Invalid;
+
+    /// Blender-style per-object ray visibility; see \ref RayVisibility
+    uint32_t m_ray_visibility = (uint32_t) RayVisibility::All;
 
     uint32_t m_discontinuity_types = (uint32_t) DiscontinuityFlags::Empty;
     /// Sampling weight (proportional to scene)
@@ -1090,6 +1106,7 @@ DRJIT_CALL_TEMPLATE_BEGIN(mitsuba::Shape)
     DRJIT_CALL_GETTER(silhouette_sampling_weight)
     DRJIT_CALL_GETTER(has_flipped_normals)
     DRJIT_CALL_GETTER(shape_type)
+    DRJIT_CALL_GETTER(ray_visibility)
     auto is_emitter() const { return emitter() != nullptr; }
     auto is_sensor() const { return sensor() != nullptr; }
     auto is_mesh() const { return (shape_type() & +mitsuba::ShapeType::Mesh) != 0; }

@@ -315,6 +315,45 @@ public:
     Mask ray_test(const Ray3f &ray, Mask coherent, Mask active) const;
 
     /**
+     * \brief Occlusion test that honours per-shape \ref RayVisibility masks
+     *
+     * Identical to \ref ray_test(), except that a shape which is invisible to \c ray_type
+     * does not occlude: the ray is re-spawned just past it and traversal continues. This is
+     * what makes Blender's per-object ray visibility expressible -- see \ref RayVisibility.
+     *
+     * When no shape in the scene carries a mask (\ref has_ray_visibility_masks() is \c
+     * false) this forwards directly to \ref ray_test() and costs nothing at all.
+     *
+     * \param ray_type
+     *    A single \ref RayVisibility bit describing the ray being traced
+     */
+    Mask ray_test_visible(const Ray3f &ray, UInt32 ray_type, Mask active = true) const;
+
+    /**
+     * \brief Preliminary ray intersection that honours per-shape \ref RayVisibility masks
+     *
+     * The counterpart of \ref ray_test_visible() for the main path: shapes invisible to \c
+     * ray_type are skipped, so the result is the first hit the ray can actually see.
+     *
+     * Returns the intersection TOGETHER WITH the ray it is relative to, because skipping a
+     * shape re-spawns the ray past it and \c pi.t is measured along the ray handed to the
+     * backend. Callers that keep a ray in their loop state must store both, exactly as they
+     * would after a \c spawn_ray(). Forwards to \ref ray_intersect_preliminary() (returning
+     * the ray unchanged) when the scene uses no masks.
+     */
+    std::pair<PreliminaryIntersection3f, Ray3f>
+    ray_intersect_preliminary_visible(const Ray3f &ray, UInt32 ray_type, Mask coherent,
+                                      Mask active = true) const;
+
+    /**
+     * \brief Does any shape in this scene restrict which ray types can see it?
+     *
+     * Integrators use this to decide whether the ray-type bookkeeping is needed at all; it
+     * is \c false for every scene that does not set the \c visible_* shape properties.
+     */
+    bool has_ray_visibility_masks() const { return m_has_ray_visibility_masks; }
+
+    /**
      * \brief Intersect a ray with the shapes comprising the scene and return
      * preliminary information, if one is found
      *
@@ -801,6 +840,8 @@ protected:
     std::unique_ptr<DiscreteDistribution<Float>> m_silhouette_distr = nullptr;
 
     bool m_shapes_grad_enabled;
+    /// True if at least one shape restricts its \ref RayVisibility
+    bool m_has_ray_visibility_masks = false;
     bool m_thread_reordering;
     /// Compact GPU acceleration structures after building. This reduces BLAS
     /// memory at the cost of an extra build-time query and compaction pass.

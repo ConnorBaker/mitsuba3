@@ -57,6 +57,24 @@ MI_VARIANT Shape<Float, Spectrum>::Shape(const Properties &props)
     }
 
     m_silhouette_sampling_weight = props.get<ScalarFloat>("silhouette_sampling_weight", 1.0f);
+
+    // Blender-style per-object ray visibility. The property names are Blender's own
+    // (`Object.visible_camera` and friends) so that a converted scene reads the same on both
+    // sides, and every one of them defaults to `true` -- a shape that mentions none of them
+    // reports RayVisibility::All and takes the historical code path exactly.
+    struct { const char *name; RayVisibility bit; } vis[] = {
+        { "visible_camera",         RayVisibility::Camera        },
+        { "visible_diffuse",        RayVisibility::Diffuse       },
+        { "visible_glossy",         RayVisibility::Glossy        },
+        { "visible_transmission",   RayVisibility::Transmission  },
+        { "visible_volume_scatter", RayVisibility::VolumeScatter },
+        { "visible_shadow",         RayVisibility::Shadow        }
+    };
+    m_ray_visibility = (uint32_t) RayVisibility::All;
+    for (auto &v : vis) {
+        if (!props.get<bool>(v.name, true))
+            m_ray_visibility &= ~((uint32_t) v.bit);
+    }
 }
 
 MI_VARIANT Shape<Float, Spectrum>::~Shape() { }

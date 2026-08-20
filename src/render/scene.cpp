@@ -113,6 +113,18 @@ MI_VARIANT Scene<Float, Spectrum>::Scene(const Properties &props)
     update_emitter_sampling_distribution();
     update_silhouette_sampling_distribution();
 
+    // Does anything in this scene restrict which ray types can see it? Answering once here is
+    // what lets `ray_test_visible` / `ray_intersect_visible` forward straight to the unmasked
+    // versions, so a scene that does not use the feature pays nothing for its existence.
+    // Instanced geometry is checked on BOTH ends: Blender's flag belongs to the object, which
+    // converts to an `instance`, but a shape inside the group may carry one directly.
+    m_has_ray_visibility_masks = false;
+    for (const Shape *shape : m_shapes)
+        m_has_ray_visibility_masks |= shape->has_ray_visibility_mask();
+    for (const ShapeGroup *group : m_shapegroups)
+        for (const auto &shape : group->shapes())
+            m_has_ray_visibility_masks |= shape->has_ray_visibility_mask();
+
     m_shapes_grad_enabled = false;
 }
 
@@ -237,6 +249,118 @@ Scene<Float, Spectrum>::ray_test(const Ray3f &ray, Mask coherent, Mask active) c
     return m_accel.ray_test(this, ray, coherent, active);
 }
 
+/**
+ * Shared step of both visibility-aware walks: given a surface interaction, report which shape
+ * owns the ray-visibility mask and whether it stops a ray of type \c ray_type.
+ *
+ * For instanced geometry `si.shape` points at the shape INSIDE the group -- shared by every
+ * instance of it -- while Blender's per-object flag belongs to the individual object, which
+ * the exporter writes as an `instance`. So the instance wins where there is one.
+ */
+template <typename ShapePtr, typename UInt32>
+static UInt32 ray_visibility_of(const ShapePtr &shape, const ShapePtr &instance) {
+    ShapePtr owner = dr::select(instance != nullptr, instance, shape);
+    return owner->ray_visibility();
+}
+
+MI_VARIANT typename Scene<Float, Spectrum>::Mask
+Scene<Float, Spectrum>::ray_test_visible(const Ray3f &ray_, UInt32 ray_type,
+                                         Mask active) const {
+    // Nothing in the scene is selective: the walk below would stop at the first hit anyway.
+    if (!m_has_ray_visibility_masks)
+        return ray_test(ray_, active);
+
+    // The ray is re-spawned past every shape it cannot see, so the distance still to cover
+    // has to be carried explicitly -- `spawn_ray` resets `maxt` to infinity.
+    struct LoopState {
+        Mask active;
+        Ray3f ray;
+        Float total_dist;
+        Mask occluded;
+
+        DRJIT_STRUCT(LoopState, active, ray, total_dist, occluded)
+    } ls = { active, Ray3f(ray_), Float(0.f), Mask(false) };
+
+    Float max_dist = ray_.maxt;
+
+    dr::tie(ls) = dr::while_loop(dr::make_tuple(ls),
+        [](const LoopState &ls) { return ls.active; },
+        [this, ray_type, max_dist](LoopState &ls) {
+            ls.ray.maxt = max_dist - ls.total_dist;
+            ls.active &= ls.ray.maxt > 0.f;
+
+            SurfaceInteraction3f si =
+                ray_intersect(ls.ray, +RayFlags::Minimal, false, ls.active);
+            Mask hit = ls.active && si.is_valid();
+
+            UInt32 vis = ray_visibility_of<ShapePtr, UInt32>(si.shape, si.instance);
+            Mask blocks = hit && ((vis & ray_type) != 0u);
+
+            ls.occluded |= blocks;
+            dr::masked(ls.total_dist, hit) += si.t;
+            dr::masked(ls.ray, hit) = si.spawn_ray(ls.ray.d);
+
+            // Keep going only where the ray passed THROUGH something it cannot see.
+            ls.active &= hit && !blocks;
+        },
+        "Scene::ray_test_visible");
+
+    return ls.occluded;
+}
+
+MI_VARIANT std::pair<typename Scene<Float, Spectrum>::PreliminaryIntersection3f,
+                     typename Scene<Float, Spectrum>::Ray3f>
+Scene<Float, Spectrum>::ray_intersect_preliminary_visible(const Ray3f &ray_, UInt32 ray_type,
+                                                          Mask coherent, Mask active) const {
+    if (!m_has_ray_visibility_masks)
+        return { ray_intersect_preliminary(ray_, coherent, false, 0, 0, active), ray_ };
+
+    struct LoopState {
+        Mask active;
+        Ray3f ray;
+        PreliminaryIntersection3f pi;
+
+        DRJIT_STRUCT(LoopState, active, ray, pi)
+    } ls = { active, Ray3f(ray_), dr::zeros<PreliminaryIntersection3f>() };
+
+    // The first iteration keeps the caller's `coherent` hint (camera rays are coherent); any
+    // further one is a scattered continuation and is not.
+    Mask first = true;
+
+    dr::tie(ls) = dr::while_loop(dr::make_tuple(ls),
+        [](const LoopState &ls) { return ls.active; },
+        [this, ray_type, coherent, &first](LoopState &ls) {
+            PreliminaryIntersection3f pi =
+                ray_intersect_preliminary(ls.ray, coherent && first, false, 0, 0, ls.active);
+            first = false;
+
+            Mask hit = ls.active && pi.is_valid();
+
+            UInt32 vis = ray_visibility_of<ShapePtr, UInt32>(pi.shape, pi.instance);
+            Mask visible = hit && ((vis & ray_type) != 0u);
+
+            // A visible hit -- or a miss -- is the answer for that lane. `pi` is kept
+            // together with `ls.ray`, which is what it is measured along.
+            dr::masked(ls.pi, ls.active) = pi;
+
+            // Skip past the shapes this ray type cannot see.
+            Mask skip = hit && !visible;
+            if (dr::any_or<true>(skip)) {
+                SurfaceInteraction3f si =
+                    pi.compute_surface_interaction(ls.ray, +RayFlags::Minimal, skip);
+                Ray3f next = si.spawn_ray(ls.ray.d);
+                next.maxt = ls.ray.maxt - si.t;
+                dr::masked(ls.ray, skip) = next;
+                dr::masked(ls.pi, skip) = dr::zeros<PreliminaryIntersection3f>();
+            }
+
+            ls.active &= skip && (ls.ray.maxt > 0.f);
+        },
+        "Scene::ray_intersect_preliminary_visible");
+
+    return { ls.pi, ls.ray };
+}
+
 MI_VARIANT typename Scene<Float, Spectrum>::SurfaceInteraction3f
 Scene<Float, Spectrum>::ray_intersect_naive(const Ray3f &ray, Mask active) const {
     MI_MASKED_FUNCTION(ProfilerPhase::RayIntersect, active);
@@ -341,7 +465,11 @@ Scene<Float, Spectrum>::sample_emitter_direction(const Interaction3f &ref, const
 
         // Mark occluded samples as invalid if requested by the user
         if (test_visibility && dr::any_or<true>(active)) {
-            Mask occluded = ray_test(ref.spawn_ray_to(ds.p), active);
+            // A visibility test issued from emitter sampling IS a shadow ray, so it is the
+            // one place `RayVisibility::Shadow` belongs. Reduces to `ray_test` verbatim when
+            // no shape in the scene sets a mask.
+            Mask occluded = ray_test_visible(ref.spawn_ray_to(ds.p),
+                                             UInt32((uint32_t) RayVisibility::Shadow), active);
             dr::masked(spec, occluded) = 0.f;
             dr::masked(ds.pdf, occluded) = 0.f;
         }
@@ -353,7 +481,11 @@ Scene<Float, Spectrum>::sample_emitter_direction(const Interaction3f &ref, const
 
         // Mark occluded samples as invalid if requested by the user
         if (test_visibility && dr::any_or<true>(active)) {
-            Mask occluded = ray_test(ref.spawn_ray_to(ds.p), active);
+            // A visibility test issued from emitter sampling IS a shadow ray, so it is the
+            // one place `RayVisibility::Shadow` belongs. Reduces to `ray_test` verbatim when
+            // no shape in the scene sets a mask.
+            Mask occluded = ray_test_visible(ref.spawn_ray_to(ds.p),
+                                             UInt32((uint32_t) RayVisibility::Shadow), active);
             dr::masked(spec, occluded) = 0.f;
             dr::masked(ds.pdf, occluded) = 0.f;
         }
