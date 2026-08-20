@@ -24,12 +24,17 @@ def refract(incident, normal, eta):
 # See blender implementation: https://github.com/blender/blender/blob/594f47ecd2d5367ca936cf6fc6ec8168c2b360d0/source/blender/gpu/shaders/material/gpu_shader_material_math.glsl#L203
 OPERATORS = {
     'ADD':            (lambda a, b, c: a + b),
+    # HSR: Blender's identifier is 'SUBTRACT'; 'SUBSTRACT' is a typo this table shipped
+    # with, kept as an alias so an unpatched exporter still works.
+    'SUBTRACT':       (lambda a, b, c: a - b),
     'SUBSTRACT':      (lambda a, b, c: a - b),
     'MULTIPLY':       (lambda a, b, c: a * b),
-    'DIVIDE':         (lambda a, b, c: a / b),
+    'DIVIDE':         (lambda a, b, c: safe_divide(a, b)),  # HSR: Blender returns 0 on b == 0
     'MULTIPLY_ADD':   (lambda a, b, c: a * b + c),
 
-    'CROSS_PRODUCT':  (lambda a, b, c: dr.cross(b, a)),
+    # HSR: was `cross(b, a)` -- the operands REVERSED, so every cross product came out
+    # negated. Caught by rendering it: Mitsuba's mean was exactly minus Cycles'.
+    'CROSS_PRODUCT':  (lambda a, b, c: dr.cross(a, b)),
     'PROJECT':        (lambda a, b, c: b * (dr.dot(a, b) / dr.dot(b, b))),
     'REFLECT':        (lambda a, b, c: mi.reflect(a, dr.normalize(b))),
     'REFRACT':        (lambda a, b, c: refract(a, b, c.x)),
@@ -42,6 +47,11 @@ OPERATORS = {
 
     'WRAP':           (lambda a, b, c: wrap(a, b, c)),
     'SNAP':           (lambda a, b, c: dr.floor(safe_divide(a, b)) * b),
+    # HSR: POWER, SIGN and ROUND are identifiers Blender's Vector Math node can emit and
+    # this table had no entry for, i.e. a KeyError per sample at render time.
+    'POWER':          (lambda a, b, c: dr.power(a, b)),
+    'SIGN':           (lambda a, b, c: dr.sign(a)),
+    'ROUND':          (lambda a, b, c: dr.round(a)),
     'FLOOR':          (lambda a, b, c: dr.floor(a)),
     'CEIL':           (lambda a, b, c: dr.ceil(a)),
     'ABSOLUTE':       (lambda a, b, c: dr.abs(a)),

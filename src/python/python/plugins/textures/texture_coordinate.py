@@ -25,7 +25,12 @@ class TextureCoordinate(mi.Texture):
         return mi.UnpolarizedSpectrum(self.eval_3(si, active))
 
     def eval_1(self, si, active):
-        raise ValueError(f"TextureCoordinate: eval_1 not supported!")
+        # HSR: used to raise. Blender's implicit vector -> float conversion is the MEAN of
+        # the three components, and a coordinate wired into a float socket (a Color Ramp's
+        # Fac, a Math operand) is an ordinary thing to do, so answer with that rather than
+        # faulting per-sample.
+        v = self.eval_3(si, active)
+        return (v.x + v.y + v.z) * (1.0 / 3.0)
 
     def eval_3(self, si, active):
         return mi.Color3f(self._eval_channel(si, active))

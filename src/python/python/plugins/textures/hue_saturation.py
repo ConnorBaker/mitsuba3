@@ -3,65 +3,52 @@ from __future__ import annotations # Delayed parsing of type annotations
 import drjit as dr
 import mitsuba as mi
 
-def modulo(a, b):
-    return (a - mi.Int32(a)) + mi.Int32(a) % b
+
+def wrap(a, b):
+    """Floored modulo: the result carries `b`'s sign, so a NEGATIVE input WRAPS.
+
+    The helper this replaces was `(a - Int32(a)) + Int32(a) % b`, and its caller reached for
+    `dr.abs` to keep it in range. `abs` REFLECTS a negative hue instead of wrapping it, which
+    maps -t to +t and therefore swaps green and blue for every hue the Hue input pushes below
+    zero. Measured, not deduced: with hue 0.32 on a red-green sweep, Cycles drew (0.76, 0,
+    0.79) where this plugin drew (0.76, 0.79, 0).
+    """
+    return a - b * dr.floor(a / b)
+
 
 def rgb2hsv(rgb):
+    """Blender's `rgb_to_hsv`, hue in [0, 1].
+
+    Rewritten from the six-sector cascade of masked assignments this replaces. That form
+    relied on the sector predicates being mutually exclusive at the boundaries, where they
+    are not (`R >= G >= B` and `R >= B >= G` are both true when G == B), so a later branch
+    could silently overwrite an earlier one. This states the sextant once.
     """
-    Convert RGB colors to HSV.
-    """
-    # Calculate maximum and minimum RGB values
-    max_rgb = dr.max(rgb)
-    min_rgb = dr.min(rgb)
+    r, g, b = rgb.x, rgb.y, rgb.z
+    mx = dr.maximum(r, dr.maximum(g, b))
+    mn = dr.minimum(r, dr.minimum(g, b))
+    delta = mx - mn
+    safe_delta = dr.select(delta > 0.0, delta, 1.0)
+    h_r = wrap((g - b) / safe_delta, 6.0)
+    h_g = (b - r) / safe_delta + 2.0
+    h_b = (r - g) / safe_delta + 4.0
+    h = dr.select(delta <= 0.0, 0.0,
+                  dr.select(mx == r, h_r, dr.select(mx == g, h_g, h_b))) / 6.0
+    s = dr.select(mx > 0.0, delta / dr.select(mx > 0.0, mx, 1.0), 0.0)
+    return mi.Color3f(h, s, mx)
 
-    # Calculate delta RGB
-    delta = max_rgb - min_rgb
-
-    # Initialize HSV array
-    hsv = mi.Color3f(0, 0, max_rgb)
-
-    R, G, B = rgb.x, rgb.y, rgb.z
-
-    # Calculate Hue
-    hsv.x[delta == 0] = 0.0
-    hsv.x[(R >= G) & (G >= B)] = 60 * (G - B) / delta
-    hsv.x[(G >= R) & (R >= B)] = 60 * (2.0 - (R - B) / delta)
-    hsv.x[(G >= B) & (B >= R)] = 60 * (2.0 + (B - R) / delta)
-    hsv.x[(B >= G) & (G >= R)] = 60 * (4.0 - (G - R) / delta)
-    hsv.x[(B >= R) & (R >= G)] = 60 * (4.0 + (R - G) / delta)
-    hsv.x[(R >= B) & (B >= G)] = 60 * (6.0 - (B - G) / delta)
-
-    # Calculate Saturation
-    hsv.y = dr.select(max_rgb == 0, 0, delta / max_rgb)
-
-    return hsv
 
 def hsv2rgb(hsv):
-    """
-    Convert HSV colors to RGB.
-    """
-    # Make sure we got a valid hue value
-    hsv.x = modulo(dr.abs(hsv.x), 360)
+    """Blender's `hsv_to_rgb`: three clamped triangle waves of the hue, hue in [0, 1]."""
+    h = wrap(hsv.x, 1.0)
+    s, v = hsv.y, hsv.z
+    nr = dr.clip(dr.abs(h * 6.0 - 3.0) - 1.0, 0.0, 1.0)
+    ng = dr.clip(2.0 - dr.abs(h * 6.0 - 2.0), 0.0, 1.0)
+    nb = dr.clip(2.0 - dr.abs(h * 6.0 - 4.0), 0.0, 1.0)
+    return mi.Color3f(((nr - 1.0) * s + 1.0) * v,
+                      ((ng - 1.0) * s + 1.0) * v,
+                      ((nb - 1.0) * s + 1.0) * v)
 
-    # Calculate chroma
-    chroma = hsv.z * hsv.y
-
-    # Calculate intermediate values
-    x = chroma * (1.0 - dr.abs(modulo(hsv.x / 60.0, 2) - 1.0))
-
-    # Calculate RGB components based on hue
-    rgb = mi.Color3f(0.0)
-    rgb[(0.0 <= hsv.x) & (hsv.x < 60.0)]    = mi.Color3f(chroma, x, 0)
-    rgb[(60.0 <= hsv.x) & (hsv.x < 120.0)]  = mi.Color3f(x, chroma, 0)
-    rgb[(120.0 <= hsv.x) & (hsv.x < 180.0)] = mi.Color3f(0, chroma, x)
-    rgb[(180.0 <= hsv.x) & (hsv.x < 240.0)] = mi.Color3f(0, x, chroma)
-    rgb[(240.0 <= hsv.x) & (hsv.x < 300.0)] = mi.Color3f(x, 0, chroma)
-    rgb[(300.0 <= hsv.x) & (hsv.x < 360.0)] = mi.Color3f(chroma, 0, x)
-
-    # Add lightness to RGB components
-    rgb += (hsv.z - chroma)
-
-    return rgb
 
 class HueSaturationValue(mi.Texture):
     '''
@@ -100,11 +87,14 @@ class HueSaturationValue(mi.Texture):
 
         hsv = rgb2hsv(color)
 
-        hsv.x = hsv.x + 360.0 * (hue - 0.5)
+        # Cycles: `h = fract(h + hue + 0.5)`, then a clamp of the result at zero before the
+        # mix. The hue is in [0, 1] now, not degrees.
+        hsv.x = wrap(hsv.x + hue + 0.5, 1.0)
         hsv.y = dr.clip(hsv.y * saturation, 0.0, 1.0)
         hsv.z *= value
 
-        return mi.Color3f(dr.lerp(color, hsv2rgb(hsv), mix))
+        shifted = dr.maximum(hsv2rgb(hsv), 0.0)
+        return mi.Color3f(dr.lerp(color, shifted, mix))
 
     def mean(self):
         return self.input.mean() # TODO best effort

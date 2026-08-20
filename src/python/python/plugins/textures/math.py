@@ -26,7 +26,7 @@ OPERATORS = {
     'ADD':            (lambda a, b, c: a + b),
     'SUBTRACT':       (lambda a, b, c: a - b),
     'MULTIPLY':       (lambda a, b, c: a * b),
-    'DIVIDE':         (lambda a, b, c: a / b),
+    'DIVIDE':         (lambda a, b, c: safe_divide(a, b)),  # HSR: Blender returns 0 on b == 0
     'MULTIPLY_ADD':   (lambda a, b, c: a * b + c),
     'POWER':          (lambda a, b, c: dr.power(a, b)),
     'LOGARITHM':      (lambda a, b, c: dr.log(a)/ dr.log(b)),
@@ -46,6 +46,9 @@ OPERATORS = {
     'FLOOR':          (lambda a, b, c: dr.floor(a)),
     'CEIL':           (lambda a, b, c: dr.ceil(a)),
     'TRUNC':          (lambda a, b, c: dr.trunc(a)),
+    # HSR: Blender's enum identifier is 'FRACT'. 'FRACTION' was never a name Blender
+    # emits, so a Fract node raised KeyError mid-render; kept as an alias.
+    'FRACT':          (lambda a, b, c: fract(a)),
     'FRACTION':       (lambda a, b, c: fract(a)),
     'MODULO':         (lambda a, b, c: dr.select(b != 0.0, a - dr.trunc(a / b) * b, 0.0)),
     'FLOORED_MODULO': (lambda a, b, c: dr.select(b != 0.0, a - dr.floor(a / b) * b, 0.0)),

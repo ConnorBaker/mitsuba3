@@ -127,8 +127,14 @@ class Mix(mi.Texture):
             res = facm * mi.Color3f(a) + fac * dr.abs(mi.Color3f(a) - mi.Color3f(b))
         elif mode == 'DARKEN':
             res = dr.minimum(mi.Color3f(a), mi.Color3f(b)) * fac + mi.Color3f(a) * facm
+        elif mode == 'ADD':
+            res = mi.Color3f(a) + fac * mi.Color3f(b)
         elif mode == 'LIGHTEN':
-            res = dr.maximum(fac * mi.Color3f(b), mi.Color3f(a))
+            # MEASURED, not recalled: `max(a, fac*b)` -- the legacy `ramp_blend` spelling --
+            # is 0.0237 mean absolute radiance away from what Cycles draws, while
+            # `lerp(a, max(a, b), fac)` is 0.0004, i.e. at the noise floor. It is the same
+            # shape as DARKEN, which is how the pair should have looked all along.
+            res = dr.lerp(mi.Color3f(a), dr.maximum(mi.Color3f(a), mi.Color3f(b)), fac)
         elif mode == 'EXCLUSION':
             ca, cb = mi.Color3f(a), mi.Color3f(b)
             res = dr.maximum(facm * ca + fac * (ca + cb - 2.0 * ca * cb), mi.Color3f(0))
