@@ -23,6 +23,24 @@ Path tracer (:monosp:`path`)
      visible light sources. 2 will lead to single-bounce (direct-only)
      illumination, and so on. (Default: -1)
 
+ * - transparent_max_depth
+   - |int|
+   - A separate budget for :monosp:`null` (transparent) interactions, matching Blender's
+     :monosp:`transparent_max_bounces`. Passing through a transparent surface is not a
+     scattering event, so with this set it is counted here instead of against
+     :monosp:`max_depth`. (Default: -1, i.e. charge null interactions to :monosp:`max_depth`
+     as before)
+
+ * - diffuse_max_depth, glossy_max_depth, transmission_max_depth
+   - |int|
+   - Per-lobe bounce budgets, matching Blender's :monosp:`diffuse_bounces`,
+     :monosp:`glossy_bounces` and :monosp:`transmission_bounces`. They partition
+     reflect-vs-transmit first, exactly as Cycles does: a transmission is charged to
+     :monosp:`transmission_max_depth` and to nothing else, so a *diffuse* transmission
+     (translucency) does not spend the diffuse budget. Exceeding any budget does not stop
+     the path immediately -- the next surface is still shaded, its emission added and its
+     direct lighting sampled, and the path ends there. (Default: -1 each, i.e. unlimited)
+
  * - rr_depth
    - |int|
    - Specifies the path depth, at which the implementation will begin to use
@@ -103,6 +121,28 @@ public:
            `max_depth` exactly as before, so no existing scene changes. */
         m_transparent_max_depth = props.get<int>("transparent_max_depth", -1);
         m_separate_null_budget = m_transparent_max_depth >= 0;
+
+        /* The same idea, for the rest of Blender's budget set. Cycles does not have one
+           bounce limit, it has five, and a converter that exports only `max_bounces` drops
+           four of them silently -- which at Blender's own defaults is not a corner case:
+           `max_bounces` is 12 while `diffuse_bounces` and `glossy_bounces` are 4, so on a
+           typical interior the limit that actually binds is one of the ones being dropped.
+
+           The counting rule is Cycles' own, from `path_state_next` in
+           `intern/cycles/kernel/integrator/path_state.h`, and it is worth stating exactly
+           because the obvious guess is wrong: the counters partition REFLECT-vs-TRANSMIT
+           first, and only then split reflection into diffuse and glossy. A transmission
+           increments `transmission_bounce` and NOTHING else -- so a DIFFUSE transmission
+           (translucency) is charged to the transmission budget, never the diffuse one.
+
+           Each is -1 by default, meaning unlimited, so a scene that names none of them is
+           rendered exactly as before. */
+        m_diffuse_max_depth      = props.get<int>("diffuse_max_depth", -1);
+        m_glossy_max_depth       = props.get<int>("glossy_max_depth", -1);
+        m_transmission_max_depth = props.get<int>("transmission_max_depth", -1);
+
+        m_lobe_budgets = m_transparent_max_depth >= 0 || m_diffuse_max_depth >= 0 ||
+                         m_glossy_max_depth >= 0 || m_transmission_max_depth >= 0;
     }
 
     std::pair<Spectrum, Bool> sample(const Scene *scene,
@@ -124,8 +164,14 @@ public:
         Float eta                     = 1.f;
         PreliminaryIntersection3f pi  = dr::zeros<PreliminaryIntersection3f>();
         UInt32 depth                  = 0;
-        // Counted separately from `depth` only when `transparent_max_depth` was given.
+        // Per-lobe budgets (\ref m_lobe_budgets); all inert unless one was configured.
         UInt32 null_depth             = 0;
+        UInt32 diffuse_depth          = 0;
+        UInt32 glossy_depth           = 0;
+        UInt32 transmission_depth     = 0;
+        /* Raised when a budget runs out, spent one iteration LATER -- see the stopping
+           criterion, where the reason it cannot be spent immediately is set out. */
+        Bool   stop_next              = false;
 
         // If m_hide_emitters == false, the environment emitter will be visible
         Mask valid_ray = !m_hide_emitters && (scene->environment() != nullptr);
@@ -150,6 +196,10 @@ public:
             Float eta;
             UInt32 depth;
             UInt32 null_depth;
+            UInt32 diffuse_depth;
+            UInt32 glossy_depth;
+            UInt32 transmission_depth;
+            Bool stop_next;
             Mask valid_ray;
             Interaction3f prev_si;
             Float prev_bsdf_pdf;
@@ -158,7 +208,8 @@ public:
             Sampler* sampler;
 
             DRJIT_STRUCT(LoopState, ray, pi, throughput, result, eta, depth, \
-                null_depth, valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta,
+                null_depth, diffuse_depth, glossy_depth, transmission_depth, stop_next,
+                valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta,
                 active, sampler)
         } ls = {
             ray,
@@ -168,6 +219,10 @@ public:
             eta,
             depth,
             null_depth,
+            diffuse_depth,
+            glossy_depth,
+            transmission_depth,
+            stop_next,
             valid_ray,
             prev_si,
             prev_bsdf_pdf,
@@ -341,16 +396,40 @@ public:
 
             // -------------------- Stopping criterion ---------------------
 
-            /* Charge the interaction to the right budget. A `null` BSDF is a pass-through,
-               not a scattering event, so with a separate budget configured it is counted as
-               Blender counts it. Without one the historical behaviour is reproduced exactly:
-               everything lands on `depth`. */
+            /* Classify the lobe that was just sampled. ONE classification, used by both the
+               bounce budgets and the ray-visibility continuation below -- but note that they
+               read it differently, and Cycles' `path_state_next` is explicit about the
+               difference:
+
+                 * the BOUNCE COUNTERS partition reflect-vs-transmit first, so the three are
+                   mutually exclusive and a diffuse TRANSMISSION is charged to transmission;
+                 * the RAY VISIBILITY bits are a UNION -- a transmission sets TRANSMIT *in
+                   addition to* DIFFUSE or GLOSSY, so a diffuse transmission ray carries two
+                   bits and is stopped by a shape that hides either one.
+
+               A `null` interaction is neither: it is a pass-through, not a scattering event,
+               which is the whole reason it gets its own budget. */
+            Mask lobe_null    = has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
+            Mask lobe_transmit = has_flag(bsdf_sample.sampled_type, BSDFFlags::Transmission);
+            Mask lobe_diffuse = has_flag(bsdf_sample.sampled_type, BSDFFlags::Diffuse);
+            Mask at_surface   = si.is_valid();
+
+            /* Charge the interaction to the right budget. Without a separate null budget the
+               historical behaviour is reproduced exactly: everything lands on `depth`. */
             if (m_separate_null_budget) {
-                Mask is_null = has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
-                dr::masked(ls.null_depth, si.is_valid() && is_null) += 1;
-                dr::masked(ls.depth, si.is_valid() && !is_null) += 1;
+                dr::masked(ls.null_depth, at_surface && lobe_null) += 1;
+                dr::masked(ls.depth, at_surface && !lobe_null) += 1;
             } else {
-                dr::masked(ls.depth, si.is_valid()) += 1;
+                dr::masked(ls.depth, at_surface) += 1;
+            }
+
+            if (m_lobe_budgets) {
+                Mask scattered = at_surface && !lobe_null;
+                dr::masked(ls.transmission_depth, scattered && lobe_transmit) += 1;
+                dr::masked(ls.diffuse_depth,
+                           scattered && !lobe_transmit && lobe_diffuse) += 1;
+                dr::masked(ls.glossy_depth,
+                           scattered && !lobe_transmit && !lobe_diffuse) += 1;
             }
 
             Float throughput_max = dr::max(unpolarized_spectrum(ls.throughput));
@@ -367,27 +446,47 @@ public:
             ls.active = active_next && (!rr_active || rr_continue) &&
                         (throughput_max != 0.f);
 
-            /* Tested here rather than beside `active_next` because it needs THIS iteration's
-               count, which is only known after the interaction has been charged above. A path
-               may cross `transparent_max_depth` null surfaces; the one after that ends it. */
-            if (m_separate_null_budget)
-                ls.active &= ls.null_depth <= (uint32_t) m_transparent_max_depth;
+            /* Budget termination, in two steps, because a budget running out does NOT stop
+               the path where it ran out. Cycles raises `PATH_RAY_TERMINATE_ON_NEXT_SURFACE`,
+               and `integrate_surface_terminate` is consulted only AFTER the next surface has
+               been shaded -- its emission added, its direct lighting sampled. So the flag
+               raised at the bottom of one iteration is spent at the bottom of the NEXT one,
+               and that ordering is the whole content of `stop_next`. Testing the counters
+               directly here instead would drop a surface's emission and its NEE contribution,
+               which is a darkening the size of one whole bounce.
+
+               `>=` and not `>`: Cycles compares the count AFTER incrementing it. */
+            if (m_lobe_budgets) {
+                ls.active &= !ls.stop_next;
+
+                Mask exhausted = false;
+                if (m_transparent_max_depth >= 0)
+                    exhausted |= ls.null_depth >= (uint32_t) m_transparent_max_depth;
+                if (m_diffuse_max_depth >= 0)
+                    exhausted |= ls.diffuse_depth >= (uint32_t) m_diffuse_max_depth;
+                if (m_glossy_max_depth >= 0)
+                    exhausted |= ls.glossy_depth >= (uint32_t) m_glossy_max_depth;
+                if (m_transmission_max_depth >= 0)
+                    exhausted |= ls.transmission_depth >= (uint32_t) m_transmission_max_depth;
+
+                ls.stop_next |= exhausted;
+            }
 
             if (unlikely(scene->has_ray_visibility_masks())) {
                 /* Blender-style per-object ray visibility (\ref RayVisibility). Which switch
                    the continuation answers to is decided by the lobe that was just sampled,
-                   which is Blender's own division: a transmitted ray is a transmission ray
-                   whether the lobe was rough or smooth, and everything that is not diffuse --
-                   including a Delta specular lobe -- counts as glossy. The type therefore
-                   varies per lane, which is why it is a `UInt32` rather than a constant. */
-                Mask is_transmission =
-                    has_flag(bsdf_sample.sampled_type, BSDFFlags::Transmission);
-                Mask is_diffuse = has_flag(bsdf_sample.sampled_type, BSDFFlags::Diffuse);
-
-                UInt32 next_type = dr::select(
-                    is_transmission, UInt32((uint32_t) RayVisibility::Transmission),
-                    dr::select(is_diffuse, UInt32((uint32_t) RayVisibility::Diffuse),
-                               UInt32((uint32_t) RayVisibility::Glossy)));
+                   which is Blender's own division: everything that is not diffuse --
+                   including a Delta specular lobe -- counts as glossy, and a transmission
+                   adds its bit ON TOP rather than replacing it. Cycles' `path_state_next`
+                   ORs `PATH_RAY_VISIBILITY_TRANSMIT` into a visibility that already carries
+                   DIFFUSE or GLOSSY, so a diffuse transmission ray answers to BOTH switches
+                   and is stopped by a shape that hides either. The type varies per lane,
+                   which is why it is a `UInt32` rather than a constant. */
+                UInt32 next_type =
+                    dr::select(lobe_diffuse, UInt32((uint32_t) RayVisibility::Diffuse),
+                               UInt32((uint32_t) RayVisibility::Glossy)) |
+                    dr::select(lobe_transmit,
+                               UInt32((uint32_t) RayVisibility::Transmission), UInt32(0u));
 
                 std::tie(ls.pi, ls.ray) = scene->ray_intersect_preliminary_visible(
                     ls.ray, next_type, /* coherent = */ false, ls.active);
@@ -415,13 +514,24 @@ public:
         return tfm::format("PathIntegrator[\n"
             "  max_depth = %u,\n"
             "  transparent_max_depth = %i,\n"
+            "  diffuse_max_depth = %i,\n"
+            "  glossy_max_depth = %i,\n"
+            "  transmission_max_depth = %i,\n"
             "  rr_depth = %u\n"
-            "]", m_max_depth, m_transparent_max_depth, m_rr_depth);
+            "]", m_max_depth, m_transparent_max_depth, m_diffuse_max_depth,
+            m_glossy_max_depth, m_transmission_max_depth, m_rr_depth);
     }
 
     /// Separate bounce budget for `null` (transparent) interactions; -1 disables it
     int m_transparent_max_depth = -1;
     bool m_separate_null_budget = false;
+
+    /// Blender's remaining per-lobe budgets; -1 each disables that one
+    int m_diffuse_max_depth = -1;
+    int m_glossy_max_depth = -1;
+    int m_transmission_max_depth = -1;
+    /// True when ANY of the four per-lobe budgets is in use
+    bool m_lobe_budgets = false;
 
     /// Compute a multiple importance sampling weight using the power heuristic
     Float mis_weight(Float pdf_a, Float pdf_b) const {
