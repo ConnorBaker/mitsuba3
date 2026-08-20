@@ -5,9 +5,11 @@ import sys
 if mi.variant() is not None and not mi.variant().startswith('scalar'):
     # List of submodules to import
     submodules = [
+        'ambient_occlusion',
         'brightness_contrast',
         'bump',
         'blender_blackbody',
+        'blender_geometry',
         'blender_image',
         'clamp',
         'color_ramp',
@@ -16,6 +18,7 @@ if mi.variant() is not None and not mi.variant().startswith('scalar'):
         'curves',
         'hue_saturation',
         'invert_color',
+        'layer_weight',
         'map_range',
         'mapping',
         'math',
