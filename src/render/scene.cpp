@@ -250,17 +250,33 @@ Scene<Float, Spectrum>::ray_test(const Ray3f &ray, Mask coherent, Mask active) c
 }
 
 /**
- * Shared step of both visibility-aware walks: given a surface interaction, report which shape
- * owns the ray-visibility mask and whether it stops a ray of type \c ray_type.
+ * Shared step of both visibility-aware walks: the ray-visibility mask that applies at a hit.
  *
- * For instanced geometry `si.shape` points at the shape INSIDE the group -- shared by every
- * instance of it -- while Blender's per-object flag belongs to the individual object, which
- * the exporter writes as an `instance`. So the instance wins where there is one.
+ * Instanced geometry has TWO places a mask can live and both are load-bearing, so they are
+ * combined rather than one winning. The `instance` stands for the individual object, which is
+ * where a per-object switch belongs; the shape inside the group is shared by every instance of
+ * it, which is where a mask implied by a MATERIAL belongs (a converter splits a mesh per
+ * material slot, so that is finer-grained than the object). A ray sees the surface only if
+ * both allow it, hence the AND.
  */
-template <typename ShapePtr, typename UInt32>
+template <typename ShapePtr, typename UInt32, typename Mask>
 static UInt32 ray_visibility_of(const ShapePtr &shape, const ShapePtr &instance) {
-    ShapePtr owner = dr::select(instance != nullptr, instance, shape);
-    return owner->ray_visibility();
+    constexpr uint32_t All = (uint32_t) RayVisibility::All;
+
+    if constexpr (!dr::is_jit_v<UInt32>) {
+        // Scalar variants hold raw pointers, and both arms of a `select` are evaluated, so
+        // the null cases have to be branched rather than masked.
+        uint32_t vis = shape ? shape->ray_visibility() : All;
+        if (instance)
+            vis &= instance->ray_visibility();
+        return vis;
+    } else {
+        Mask has_instance = instance != nullptr;
+        UInt32 shape_vis = dr::select(shape != nullptr, shape->ray_visibility(), UInt32(All));
+        UInt32 inst_vis =
+            dr::select(has_instance, instance->ray_visibility(), UInt32(All));
+        return shape_vis & inst_vis;
+    }
 }
 
 MI_VARIANT typename Scene<Float, Spectrum>::Mask
@@ -293,7 +309,7 @@ Scene<Float, Spectrum>::ray_test_visible(const Ray3f &ray_, UInt32 ray_type,
                 ray_intersect(ls.ray, +RayFlags::Minimal, false, ls.active);
             Mask hit = ls.active && si.is_valid();
 
-            UInt32 vis = ray_visibility_of<ShapePtr, UInt32>(si.shape, si.instance);
+            UInt32 vis = ray_visibility_of<ShapePtr, UInt32, Mask>(si.shape, si.instance);
             Mask blocks = hit && ((vis & ray_type) != 0u);
 
             ls.occluded |= blocks;
@@ -323,20 +339,18 @@ Scene<Float, Spectrum>::ray_intersect_preliminary_visible(const Ray3f &ray_, UIn
         DRJIT_STRUCT(LoopState, active, ray, pi)
     } ls = { active, Ray3f(ray_), dr::zeros<PreliminaryIntersection3f>() };
 
-    // The first iteration keeps the caller's `coherent` hint (camera rays are coherent); any
-    // further one is a scattered continuation and is not.
-    Mask first = true;
-
+    // The caller's `coherent` hint is kept on every iteration. It is only a hint, and a set
+    // of rays that was coherent before skipping a shape is still coherent after: they are
+    // re-spawned from a common surface along their original directions.
     dr::tie(ls) = dr::while_loop(dr::make_tuple(ls),
         [](const LoopState &ls) { return ls.active; },
-        [this, ray_type, coherent, &first](LoopState &ls) {
+        [this, ray_type, coherent](LoopState &ls) {
             PreliminaryIntersection3f pi =
-                ray_intersect_preliminary(ls.ray, coherent && first, false, 0, 0, ls.active);
-            first = false;
+                ray_intersect_preliminary(ls.ray, coherent, false, 0, 0, ls.active);
 
             Mask hit = ls.active && pi.is_valid();
 
-            UInt32 vis = ray_visibility_of<ShapePtr, UInt32>(pi.shape, pi.instance);
+            UInt32 vis = ray_visibility_of<ShapePtr, UInt32, Mask>(pi.shape, pi.instance);
             Mask visible = hit && ((vis & ray_type) != 0u);
 
             // A visible hit -- or a miss -- is the answer for that lane. `pi` is kept
