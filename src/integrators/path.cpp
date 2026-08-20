@@ -315,7 +315,7 @@ public:
 
         dr::tie(ls) = dr::while_loop(dr::make_tuple(ls),
             [](const LoopState& ls) { return ls.active; },
-            [this, scene, bsdf_ctx](LoopState& ls) {
+            [this, scene, bsdf_ctx, &ray_](LoopState& ls) {
 
             /* dr::while_loop implicitly masks all code in the loop using the
                'active' flag, so there is no need to pass it to every function */
@@ -323,6 +323,39 @@ public:
             // Fill out all information of the interaction
             SurfaceInteraction3f si =
                 ls.pi.compute_surface_interaction(ls.ray, +RayFlags::All);
+
+            /* UV PARTIALS -- the screen-space texture footprint, which Cycles' Bump node
+               differences the height field over (`dP.dx`, `dP.dy` in
+               `kernel/svm/displace.h`). Mitsuba declares `si.duv_dx` / `si.duv_dy` but
+               leaves them ZERO unless somebody calls `compute_uv_partials`; nothing did,
+               so the `bump` texture plugin fell back to differencing over one TEXEL.
+
+               That is not a small difference. Measured on `Fabric Sofa` from the Blender
+               splash scene, sphere-centre mean, Mitsuba/Cycles:
+
+                   render 40px  1.0780     render 160px  1.5192
+                   render 80px  1.3550     render 320px  1.6590
+
+               Cycles moves 35% across that ladder because its bump IS a screen-space
+               effect; Mitsuba was flat to four digits because a texel is the same size
+               however many pixels cover it. There is no constant step that fixes this --
+               the correct one varies per shading point -- which is why the footprint has
+               to be carried rather than tuned.
+
+               ONLY THE FIRST VERTEX. `ray_` carries differentials; `ls.ray` is a plain
+               `Ray3f` and every ray spawned inside the loop is too, so there is nothing to
+               propagate past the camera hit. Cycles does carry an approximate widened
+               differential through the path; we do not, and the fallback in the `bump`
+               plugin covers the remaining vertices. Recorded as a known residual rather
+               than hidden: bump seen through a mirror or a rough bounce is still
+               differenced at texel scale. */
+            if (dr::any_or<true>(ls.depth == 0u)) {
+                SurfaceInteraction3f si_d(si);
+                si_d.compute_uv_partials(ray_);
+                Mask first = ls.active && (ls.depth == 0u);
+                dr::masked(si.duv_dx, first) = si_d.duv_dx;
+                dr::masked(si.duv_dy, first) = si_d.duv_dy;
+            }
 
             /* Filter glossy: hand this shade point the roughness floor implied by how
                improbable the path that reached it was. Cycles does the same thing at the
