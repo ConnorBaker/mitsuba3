@@ -99,7 +99,12 @@ template <typename Ptr, typename Cls> void bind_shape_generic(Cls &cls) {
             [](Ptr shape) { return shape->ray_visibility(); },
             "Which ray types can see this shape (a mask of RayVisibility bits)")
        .def("has_ray_visibility_mask",
-            [](Ptr shape) { return shape->has_ray_visibility_mask(); },
+            // Derived rather than forwarded: `Ptr` is Dr.Jit's call-support wrapper, which
+            // exposes only the methods listed in shape.h's DRJIT_CALL block. Adding a second
+            // getter there to carry a comparison the caller can make is not worth a vcall.
+            [](Ptr shape) {
+                return shape->ray_visibility() != (uint32_t) RayVisibility::All;
+            },
             "Is this shape invisible to at least one ray type?")
        .def("interior_medium",
             [](Ptr shape) -> RetMedium { return shape->interior_medium(); },
