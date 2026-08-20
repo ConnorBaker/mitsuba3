@@ -21,37 +21,48 @@ import drjit as dr
 import mitsuba as mi
 
 
-def _scene(flip, two_sided, spp_shape=True):
-    """A diffuse floor lit by a rectangle above it.
+def _scene(flip, two_sided):
+    """A floor lit by a lamp ABOVE and OUTSIDE the frame.
 
-    `flip=True` turns the emitter's normals AWAY from the floor, which is the case a
-    one-sided light cannot render and a two-sided one must.
+    The lamp must not be visible to the camera, and getting that wrong is not a detail:
+    a first version put it between the floor and the camera, where a one-sided lamp
+    turned away from the floor still shines straight AT the camera. The "is it dark?"
+    control then read 0.0206 instead of ~0, and the equality test was off by the lamp's
+    own image rather than by anything about the emitter. With the lamp out of frame the
+    only path to the sensor is floor illumination, which is the quantity under test.
+
+    `flip=True` turns the lamp's normal AWAY from the floor -- the case a one-sided light
+    cannot render and a two-sided one must. Position, area and solid angle are identical
+    in both arms; only the orientation differs.
     """
     return mi.load_dict({
         'type': 'scene',
         'integrator': {'type': 'path', 'max_depth': 3},
         'sensor': {
             'type': 'perspective',
-            'fov': 45,
+            'fov': 30,
+            # Below the lamp and looking down at the floor, so the lamp sits ~34 degrees
+            # off the view axis against a 15 degree half-angle -- comfortably out of frame.
             'to_world': mi.ScalarTransform4f().look_at(
-                origin=[0, 0, 5], target=[0, 0, 0], up=[0, 1, 0]),
+                origin=[0, -0.5, 4], target=[0, -1, 0], up=[0, 1, 0]),
             'film': {'type': 'hdrfilm', 'width': 32, 'height': 32,
                      'rfilter': {'type': 'box'}},
-            'sampler': {'type': 'independent', 'sample_count': 256, 'seed': 7},
+            'sampler': {'type': 'independent', 'sample_count': 512, 'seed': 7},
         },
         'floor': {
             'type': 'rectangle',
-            'to_world': mi.ScalarTransform4f().translate([0, 0, -1]),
+            # Horizontal, normal +y (up).
+            'to_world': mi.ScalarTransform4f().translate([0, -1, 0])
+                                              .rotate([1, 0, 0], -90).scale(4),
             'bsdf': {'type': 'diffuse', 'reflectance': 0.8},
         },
         'lamp': {
             'type': 'rectangle',
-            # Sits between the floor and the camera, face-on. `flip_normals` turns it
-            # away from the floor without moving it, so the two arms differ ONLY in
-            # orientation -- same position, same area, same solid angle.
-            'to_world': mi.ScalarTransform4f().translate([0, 0, 1.0]).scale(0.3),
+            # Horizontal at y = 1.5; unflipped normal is -y, i.e. pointing DOWN at the floor.
+            'to_world': mi.ScalarTransform4f().translate([0, 1.5, 0])
+                                              .rotate([1, 0, 0], 90).scale(0.5),
             'flip_normals': flip,
-            'emitter': {'type': 'area', 'radiance': 10.0, 'two_sided': two_sided},
+            'emitter': {'type': 'area', 'radiance': 20.0, 'two_sided': two_sided},
         },
     })
 
