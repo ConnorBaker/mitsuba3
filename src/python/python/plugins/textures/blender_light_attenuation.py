@@ -121,10 +121,21 @@ class BlenderLightAttenuation(mi.Texture):
         return self.radiance.mean()
 
     def is_spatially_varying(self):
-        # The attenuation varies with the EMITTED DIRECTION, which on a curved emitter also
-        # means it varies across the surface. Saying otherwise would licence a caller to
-        # evaluate this once and reuse it.
-        return True
+        # This answers "does the value depend on si.uv", and the two modes differ.
+        #
+        # SPOT rides on a SPHERE. Every point of a sphere has a different shading frame, so
+        # the same emitted direction gives a different `wi` at each one and the value really
+        # does vary across the surface. True.
+        #
+        # AREA_SPREAD rides on a flat `rectangle` or `disk`, whose shading frame is constant.
+        # The value there is a function of the emitted DIRECTION alone and of `si.uv` not at
+        # all -- so False, and saying True was wrong on its own terms as well as costly.
+        # `area::sample_direction` branches on this: True selects importance sampling of the
+        # TEXTURE, which asks for `sample_position` / `pdf_position` this plugin does not
+        # implement, so both fall back to the base class and the density that comes back is
+        # not the one the sample was drawn from. False selects the shape's own solid-angle
+        # sampling, which is the strategy a flat emitter wants anyway.
+        return self.mode == 'SPOT'
 
     def to_string(self):
         return f'BlenderLightAttenuation[{self.mode}, radiance={self.radiance}]'
