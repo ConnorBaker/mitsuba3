@@ -1,5 +1,10 @@
 # Blender's Blackbody node -- `kernel/svm/blackbody.h`.
 #
+# Registered as `blender_blackbody`, NOT `blackbody`: Mitsuba ships its own `blackbody`, a
+# SPECTRAL Planck emitter that takes a scalar temperature. Registering over it produced a
+# plugin that loaded and then rejected a textured temperature with "expected float, got
+# object" -- a name collision presenting as a type error two layers down.
+#
 # The colour is a PIECEWISE FIT of the Planckian locus in Rec.709 with seven temperature
 # knots, not a Planck evaluation; reproducing the physics instead of the fit would give a
 # defensible answer that does not match the render.
@@ -44,4 +49,4 @@ class Blackbody(mi.Texture):
         return 'Blackbody[temperature=%s]' % self.temperature
 
 
-mi.register_texture('blackbody', lambda props: Blackbody(props))
+mi.register_texture('blender_blackbody', lambda props: Blackbody(props))
