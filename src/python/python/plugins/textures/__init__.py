@@ -7,6 +7,7 @@ if mi.variant() is not None and not mi.variant().startswith('scalar'):
     submodules = [
         'brightness_contrast',
         'clamp',
+        'color_ramp',
         'combine_color',
         'curves',
         'hue_saturation',
@@ -14,6 +15,7 @@ if mi.variant() is not None and not mi.variant().startswith('scalar'):
         'map_range',
         'math',
         'mesh_attribute_adapter',
+        'mix_color',
         'noise',
         'normalmap',
         'rgb_to_bw',

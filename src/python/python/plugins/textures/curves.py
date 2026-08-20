@@ -22,6 +22,13 @@ def eval_curve(points, value):
 
     return res
 
+def str_to_points(s):
+    points = []
+    for elems in s.split('-'):
+        p = elems.split()
+        points.append([float(p[0]), float(p[1])])
+    return points
+
 class FloatCurve(mi.Texture):
     '''
     Float curve Blender shader node texture.
@@ -75,10 +82,10 @@ class RGBCurve(mi.Texture):
         mi.Texture.__init__(self, props)
         self.factor = props.get_texture('factor', 1.0)
         self.color  = props.get_texture('color')
-        self.points_c = np.array(props.get('points_c')).tolist()
-        self.points_r = np.array(props.get('points_r')).tolist()
-        self.points_g = np.array(props.get('points_g')).tolist()
-        self.points_b = np.array(props.get('points_b')).tolist()
+        self.points_c = str_to_points(props.get('points_c'))
+        self.points_r = str_to_points(props.get('points_r'))
+        self.points_g = str_to_points(props.get('points_g'))
+        self.points_b = str_to_points(props.get('points_b'))
 
     def traverse(self, cb):
         cb.put('factor', self.factor, +mi.ParamFlags.Differentiable)

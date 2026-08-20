@@ -7,6 +7,8 @@ if mi.variant() is not None and not mi.variant().startswith('scalar'):
     submodules = [
         'common',
         'blender_principled',
+        'refraction',
+        'translucent',
     ]
 
     # Are we importing the submodules for the first time or reloading them?
