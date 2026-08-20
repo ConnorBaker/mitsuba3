@@ -605,10 +605,6 @@ public:
         MI_MASKED_FUNCTION(ProfilerPhase::TextureEvaluate, active);
 
         const size_t channels = m_texture.channel_count();
-        if (channels != 3)
-            Throw("eval_3(): The bitmap texture %s was queried for a RGB "
-                  "value, but it is monochromatic!",
-                  to_string());
         if (stores_spectral_coeffs(channels))
             Throw("eval_3(): The bitmap texture %s was queried for a RGB "
                   "value, but texture conversion to color spectra had "
@@ -617,6 +613,17 @@ public:
 
         if (dr::none_or<false>(active))
             return dr::zeros<Color3f>();
+
+        /* HSR: a single-channel texture BROADCASTS rather than throwing. `eval()` two
+           functions up already does exactly this for `channels == 1`, so the throw made
+           `eval_3` the one entry point that could not read a greyscale image -- and every
+           wrapper plugin (`uv_wrapper`, `mix_color`, `math`, ...) forwards `eval_3`, so a
+           greyscale map behind any of them faulted mid-render. Broadcasting is also what
+           every DCC means by a greyscale image in a colour slot: Blender/Cycles returns
+           `make_float4(f, f, f, 1)` for IMAGE_DATA_TYPE_FLOAT / BYTE
+           (intern/cycles/kernel/svm/image.h). */
+        if (channels == 1)
+            return Color3f(interpolate_1(si, active));
 
         return interpolate_3(si, active);
     }
