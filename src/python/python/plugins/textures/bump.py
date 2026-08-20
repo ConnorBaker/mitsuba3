@@ -15,39 +15,48 @@ class Bump(mi.Texture):
     the same socket a Normal Map node would feed -- including when a Normal Map feeds THIS
     node's `normal` input, which is how the two are chained in Blender.
 
-    THE DIFFERENCING SCALE IS THE WHOLE BALLGAME, AND A UV GRADIENT IS NOT ENOUGH.
+    THE DIFFERENCING SCALE IS THE WHOLE BALLGAME, AND CYCLES' FOOTPRINT IS ISOTROPIC.
     Cycles computes `surfgrad = (h_x - h_c)*Rx + (h_y - h_c)*Ry` with `Rx = dP.dy x N`,
     `Ry = N x dP.dx`, `det = dP.dx . Rx`, then
     `N' = normalize(fw*|det|*N - dist*sign(det)*surfgrad)` (`kernel/svm/displace.h`), where
-    `h_x` and `h_y` are the height re-evaluated at the shading point offset by the
-    RAY-DIFFERENTIAL footprint `dP.dx*fw` and `dP.dy*fw`.
+    `h_x` and `h_y` are the height re-evaluated at the shading point offset by `dP.dx*fw`
+    and `dP.dy*fw` -- the offset is applied at the SOURCE nodes, e.g.
+    `data.val += data.dx * node.bump_filter_width` in `kernel/svm/tex_coord.h`.
 
-    This docstring used to argue that substituting (u, v) for (x, y) is equivalent, because
-    `surfgrad/det` is the intrinsic tangential gradient and therefore basis-independent.
-    That is true of the EXACT gradient and false of the DISCRETE one, which is what both
-    renderers actually compute: Cycles differences over a screen-space PIXEL FOOTPRINT and
-    the old code differenced over one TEXEL. Measured on `Fabric Sofa` from the Blender
-    splash scene (sphere-centre mean, Mitsuba/Cycles):
+    Two successive readings of that code were wrong here, and the second is the subtle one:
 
-        render  40px  1.0780        render 160px  1.5192
-        render  80px  1.3550        render 320px  1.6590
+    1. This docstring once argued that substituting (u, v) for (x, y) is equivalent, because
+       `surfgrad/det` is the intrinsic tangential gradient and therefore basis-independent.
+       True of the EXACT gradient, false of the DISCRETE one. Cycles differences over a
+       screen-space footprint and the old code differenced over one TEXEL, so on `Fabric
+       Sofa` (splash scene, sphere-centre mean, Mitsuba/Cycles) Cycles moved 35% across a
+       40/80/160/320 px ladder -- 0.387547 / 0.306080 / 0.273144 / 0.250178 -- while the
+       implementation was flat to four digits. A texel is the same size however many pixels
+       cover it.
 
-    Cycles moves 35% across that ladder -- its bump is a screen-space effect by design --
-    while the old implementation was flat to four significant digits, because a texel is the
-    same size however many pixels cover it. Sweeping the old `uv_step` at fixed resolution
-    gave 0.7391 / 1.1479 / 1.3550 / 2.0596 / 2.5925 for 1/2048 ... 1/16, so the scale was
-    exactly the free parameter and no constant value is right for more than one scene.
+    2. The obvious fix -- feed `si.duv_dx` / `si.duv_dy` straight in -- is ALSO wrong, and
+       measurably so: it moved the same ladder to 0.6415 / 0.6915 / 0.7596 / 0.8355, i.e.
+       from 35% too bright to 30% too DARK. Cycles never uses the anisotropic differential
+       here. `svm_node_set_bump` reads `differential_from_compact(sd->Ng, sd->dP)`, and
+       `sd->dP` is the COMPACTED scalar `0.5*(|dP.dx| + |dP.dy|)`
+       (`differential_make_compact`); `differential_from_compact` then rebuilds an
+       ISOTROPIC, orthonormal pair `(r*ex, r*ey)` in the tangent plane from
+       `make_orthonormals(Ng)`. So the footprint is a CIRCLE of radius r, not the true
+       screen-space parallelogram. That is not a detail: `det` is the parallelogram AREA, so
+       at grazing incidence the true differential has `det << r^2` while `|surfgrad|` does
+       not shrink with it, and the second term of `N'` runs away -- exactly the 30%
+       over-perturbation measured above. Reproduced here literally, including
+       `make_orthonormals`' own basis choice and its `N.x != N.y || N.x != N.z` branch.
 
-    So the footprint is now taken from `si.duv_dx` / `si.duv_dy`, which is the same quantity
-    Cycles uses, and the arithmetic below is Cycles' line for line -- FORWARD differences
-    (`h_x - h_c`, not a central difference), `Rx`/`Ry`/`det` built from the screen-space
-    surface derivatives rather than from `dp_du`/`dp_dv`, `max(strength, 0)`, and the final
-    `normalize(mix(N, N', strength))`.
+    Everything else is Cycles' line for line: FORWARD differences (`h_x - h_c`, not a
+    central difference), `Rx`/`Ry`/`det` built from `normal_in` rather than from `Ng` (they
+    differ whenever a Normal Map feeds this node, and then `det = r^2 * (Ng . N_in)` rather
+    than `r^2`), `max(strength, 0)`, and the final `normalize(mix(N, N', strength))`.
 
     THE FALLBACK, AND WHY IT IS NOT SILENT. `duv_dx` is only populated where a ray carries
     differentials -- the camera hit. Mitsuba does not propagate them past the first bounce
-    (Cycles carries an approximate widened differential), so at deeper vertices this falls
-    back to an axis-aligned texel-sized footprint, i.e. the old behaviour. Bump seen
+    (Cycles carries an approximate widened differential), so at deeper vertices the radius
+    falls back to a texel-sized world-space length, i.e. the old behaviour. Bump seen
     directly is now correct; bump seen in a mirror or after a rough bounce is still
     differenced at texel scale. That is a known residual, recorded here and in the
     integrator, not a silent substitution.
@@ -73,8 +82,9 @@ class Bump(mi.Texture):
         Cycles' Bump node `Filter Width` input, which scales the footprint the height field
         is differenced over. Blender's default is 0.1 and so is this one.
     uv_step : float
-        Fallback differencing step in UV, used only where the shading point carries no ray
-        differentials. Default 0, meaning "derive it from the height texture's resolution".
+        Fallback differencing step in UV, converted to a world-space radius and used only
+        where the shading point carries no ray differentials. Default 0, meaning "derive
+        it from the height texture's resolution".
     '''
 
     def __init__(self, props):
@@ -125,20 +135,51 @@ class Bump(mi.Texture):
         s.uv = mi.Point2f(si.uv.x + du, si.uv.y + dv)
         return self.height.eval_1(s, active)
 
-    def _footprint(self, si):
-        """The UV offsets to difference the height field over: (duv_dx, duv_dy).
+    def _orthonormals(self, n):
+        """Cycles' `make_orthonormals` (`util/math_float3.h`), branch and all.
+
+        The basis is arbitrary but it must be THE SAME arbitrary basis: `b = cross(n, a)`
+        makes `(a, b, n)` right-handed, which is what fixes `sign(det)` to +1 for an
+        unperturbed normal. A different-handed basis flips every bump in the scene.
+        """
+        a = mi.Vector3f(n.z - n.y, n.x - n.z, n.y - n.x)
+        # `if (N.x != N.y || N.x != N.z)` takes the first form; the all-equal case is
+        # degenerate for it (the cross product with (1,1,1) vanishes) and takes the second.
+        degenerate = (n.x == n.y) & (n.x == n.z)
+        a = dr.select(degenerate, mi.Vector3f(n.z - n.y, n.x + n.z, -n.y - n.x), a)
+        a = dr.normalize(a)
+        return a, dr.cross(n, a)
+
+    def _radius(self, si):
+        """Cycles' compacted differential: the scalar `0.5*(|dP.dx| + |dP.dy|)`.
 
         Where the shading point carries ray differentials this is the screen-space pixel
-        footprint, which is what Cycles uses. Where it does not -- every vertex past the
-        camera hit, since Mitsuba drops differentials there -- it degenerates to an
-        axis-aligned texel-sized step, chosen per lane rather than globally so a scene with
+        footprint radius, which is what Cycles uses. Where it does not -- every vertex past
+        the camera hit, since Mitsuba drops differentials there -- it degenerates to a
+        texel-sized world-space length, chosen per lane rather than globally so a scene with
         both kinds of vertex gets each treated correctly.
         """
         dx, dy = mi.Vector2f(si.duv_dx), mi.Vector2f(si.duv_dy)
         have = (dr.abs(dx.x) + dr.abs(dx.y) + dr.abs(dy.x) + dr.abs(dy.y)) > 0.0
-        fx = mi.Vector2f(dr.select(have, dx.x, self.step_u), dr.select(have, dx.y, 0.0))
-        fy = mi.Vector2f(dr.select(have, dy.x, 0.0), dr.select(have, dy.y, self.step_v))
-        return fx, fy
+        dp_du, dp_dv = mi.Vector3f(si.dp_du), mi.Vector3f(si.dp_dv)
+        r_diff = 0.5 * (dr.norm(dp_du * dx.x + dp_dv * dx.y) +
+                        dr.norm(dp_du * dy.x + dp_dv * dy.y))
+        r_texel = 0.5 * (dr.norm(dp_du) * self.step_u + dr.norm(dp_dv) * self.step_v)
+        return dr.select(have, r_diff, r_texel)
+
+    def _uv_of(self, dp_du, dp_dv, w):
+        """The UV offset whose surface displacement is `w`, i.e. Cycles' `differential_dudv`.
+
+        Cycles drops the least stable of the three world axes and applies Cramer's rule to
+        what is left. The normal-equation solve below is the same answer wherever `w` lies
+        in span(dp_du, dp_dv) -- which it does here, since `w` is built from a basis of the
+        tangent plane -- and it needs no axis-selection branch.
+        """
+        a11, a12, a22 = dr.dot(dp_du, dp_du), dr.dot(dp_du, dp_dv), dr.dot(dp_dv, dp_dv)
+        g = a11 * a22 - a12 * a12
+        inv = dr.select(g != 0.0, dr.rcp(g), 0.0)
+        b1, b2 = dr.dot(dp_du, w), dr.dot(dp_dv, w)
+        return mi.Vector2f((a22 * b1 - a12 * b2) * inv, (a11 * b2 - a12 * b1) * inv)
 
     def _perturbed_normal(self, si, active):
         if self.has_normal:
@@ -148,22 +189,28 @@ class Bump(mi.Texture):
             n = mi.Normal3f(si.sh_frame.n)
 
         fw = self.filter_width.eval_1(si, active)
-        duv_dx, duv_dy = self._footprint(si)
-        duv_dx = duv_dx * fw
-        duv_dy = duv_dy * fw
 
-        # Screen-space surface derivatives, exactly Cycles' `dP.dx` / `dP.dy`, expressed in
-        # the basis this renderer does carry: dP/dx = dp_du * du/dx + dp_dv * dv/dx.
+        # Cycles' isotropic footprint: a scalar radius and an orthonormal pair built from
+        # the GEOMETRIC normal -- not the true anisotropic screen differential. See the
+        # class docstring; using the anisotropic one measurably over-perturbs.
         dp_du = mi.Vector3f(si.dp_du)
         dp_dv = mi.Vector3f(si.dp_dv)
-        dp_dx = dp_du * duv_dx.x + dp_dv * duv_dx.y
-        dp_dy = dp_du * duv_dy.x + dp_dv * duv_dy.y
+        radius = self._radius(si)
+        ex, ey = self._orthonormals(mi.Normal3f(si.n))
+        dp_dx = ex * radius
+        dp_dy = ey * radius
+
+        duv_dx = self._uv_of(dp_du, dp_dv, dp_dx * fw)
+        duv_dy = self._uv_of(dp_du, dp_dv, dp_dy * fw)
 
         # FORWARD differences at the offset points -- `h_x - h_c`, not a central difference.
         h_c = self._height_at(si, 0.0, 0.0, active)
         h_x = self._height_at(si, duv_dx.x, duv_dx.y, active)
         h_y = self._height_at(si, duv_dy.x, duv_dy.y, active)
 
+        # `dp_dx` / `dp_dy` enter here UNSCALED by `fw`: Cycles applies the filter width to
+        # the texture-coordinate offset (`tex_coord.h`) and, separately, to the first term
+        # below (`displace.h`) -- never to the `dP` that builds `Rx` / `Ry` / `det`.
         Rx = dr.cross(dp_dy, n)
         Ry = dr.cross(n, dp_dx)
         det = dr.dot(dp_dx, Rx)
