@@ -21,7 +21,12 @@ public:
             ref<Object> shape = prop.get<ref<Object>>();
             Mesh *mesh = prop.try_get<Mesh>();
 
-            if (!mesh || mesh->has_mesh_attributes()) {
+            /* `Mesh::merge` cannot carry texture attributes across -- the merged mesh
+               is built from a `Properties` these were never written back into, so a
+               BSDF that reads one would find it simply gone. They are therefore
+               excluded from merging outright, exactly as mesh attributes are. */
+            if (!mesh || mesh->has_mesh_attributes() ||
+                mesh->has_texture_attributes()) {
                 m_objects.push_back(shape);
                 ignored++;
                 continue;
@@ -52,6 +57,11 @@ public:
                incompatible") on a scene that is perfectly legal. Splitting them here
                turns a hard failure into the grouping the throw always expected. */
             key.flip_normals = mesh->has_flipped_normals();
+            /* Every field `Mesh::merge` THROWS on has to appear in this key, or a
+               perfectly legal scene aborts at load instead of merging into more
+               groups. That is not a hypothetical coupling: it is precisely how the
+               `flip_normals` arm above failed. */
+            key.silhouette_sampling_weight = mesh->silhouette_sampling_weight();
 
             auto [it, success] = tbl.try_emplace(key, mesh);
             if (!success)
@@ -91,6 +101,7 @@ private:
         bool has_face_normals;
         uint32_t ray_visibility;
         bool flip_normals;
+        float silhouette_sampling_weight;
 
         bool operator==(const Key &o) const {
             return bsdf == o.bsdf &&
@@ -102,7 +113,8 @@ private:
                    has_texcoords == o.has_texcoords &&
                    has_face_normals == o.has_face_normals &&
                    ray_visibility == o.ray_visibility &&
-                   flip_normals == o.flip_normals;
+                   flip_normals == o.flip_normals &&
+                   silhouette_sampling_weight == o.silhouette_sampling_weight;
         }
     };
 
@@ -119,7 +131,8 @@ private:
             int flags = (k.has_normals ? 1 : 0) + (k.has_texcoords ? 2 : 0) +
                         (k.has_face_normals ? 4 : 0) + (k.flip_normals ? 8 : 0);
             hash_combine(seed, k.bsdf, k.interior_medium, k.exterior_medium,
-                         k.emitter, k.sensor, flags, k.ray_visibility);
+                         k.emitter, k.sensor, flags, k.ray_visibility,
+                         k.silhouette_sampling_weight);
             return seed;
         }
     };

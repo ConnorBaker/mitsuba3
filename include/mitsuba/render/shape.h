@@ -685,6 +685,9 @@ public:
      *     Texture to store. The dimensionality of the attribute
      *     is simply the channel count of the texture.
      */
+    /// Does this shape carry any texture attribute? (\ref add_texture_attribute)
+    bool has_texture_attributes() const { return !m_texture_attributes.empty(); }
+
     virtual void add_texture_attribute(std::string_view name, Texture *texture);
 
     /// Return the texture attribute associated with \c name.

@@ -746,6 +746,8 @@ Mesh<Float, Spectrum>::merge(const Mesh *other) const {
         other->has_face_normals() != has_face_normals() ||
         other->ray_visibility() != ray_visibility() ||
         other->has_flipped_normals() != has_flipped_normals() ||
+        other->silhouette_sampling_weight() != silhouette_sampling_weight() ||
+        other->has_texture_attributes() || has_texture_attributes() ||
         other->has_mesh_attributes() || has_mesh_attributes())
         Throw("Mesh::merge(): the two meshes are incompatible (%s and %s)!",
               to_string(), other->to_string());
@@ -763,6 +765,12 @@ Mesh<Float, Spectrum>::merge(const Mesh *other) const {
         props.set("emitter", (Object *) m_emitter.get());
     props.set("face_normals", m_face_normals);
     props.set("flip_normals", m_flip_normals);
+    /* Unlike the ray-visibility mask below, this one DOES have a spelling the base
+       `Shape` constructor reads back, so it can travel the ordinary way. It was absent
+       here, which silently reset every merged mesh to the 1.0 default and re-weighted
+       silhouette sampling in differentiable renders. The guard above has established
+       that both operands agree. */
+    props.set("silhouette_sampling_weight", (double) m_silhouette_sampling_weight);
 
     ref<Mesh> result = new Mesh(
         m_name + " + " + other->m_name, m_vertex_count + other->vertex_count(),
