@@ -485,10 +485,25 @@ public:
                A pass-through is not a scattering event and must not tighten the bound --
                otherwise a stack of transparent surfaces would blur everything behind it. */
             if (m_filter_glossy_enabled) {
-                /* `si.is_valid()` matters as much as the Null test: a ray that ESCAPED
-                   has `bsdf_sample.pdf == 0`, and `min(0, min_ray_pdf)` pins the bound to
-                   zero, which is the MAXIMUM blur. Cycles cannot hit this because it only
-                   reaches the update after a real surface hit. */
+                /* `si.is_valid()` is DEFENSIVE, and unlike the Null test it is not
+                   currently load-bearing -- said plainly because the first version of this
+                   comment claimed otherwise. The reasoning that motivated it is sound as
+                   far as it goes: `ls.active` here still holds the PREVIOUS iteration's
+                   value (in vectorized mode it is only reassigned at the `ls.active =
+                   active_next && ...` line below, whereas `active_next` is what carries
+                   `si.is_valid()`), so an escaped lane does reach this line, and its
+                   `bsdf_sample.pdf` is 0 -- which would pin the bound to 0, the MAXIMUM
+                   blur. What the reasoning missed is that the same lane is killed at that
+                   `ls.active` line before it can ever READ `min_ray_pdf` again, so the
+                   corrupted bound is never used.
+
+                   Measured rather than argued: building with and without this clause gives
+                   byte-identical images (6/6 sha256 matches over open scenes chosen to
+                   escape as much as possible, half with a constant envmap so escaping rays
+                   carry energy). Kept anyway -- it costs one mask operation and it is the
+                   difference between "correct" and "correct as long as nobody reorders the
+                   termination logic". Cycles cannot reach the case at all, because it only
+                   arrives at the update after a real surface hit. */
                 Mask scattered = ls.active && si.is_valid() &&
                     !has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
                 dr::masked(ls.min_ray_pdf, scattered) =
