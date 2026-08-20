@@ -4,6 +4,8 @@ from typing import Tuple
 import drjit as dr
 import mitsuba as mi
 
+from .blender_color import rgb_to_hsl, rgb_to_hsv
+
 class SeparateRGB(mi.Texture):
     '''
     Separate RGB Blender shader node texture.
@@ -22,6 +24,13 @@ class SeparateRGB(mi.Texture):
         self.channel = props.get('channel', 'r')
         if self.channel not in ['r', 'g', 'b']:
             raise ValueError(f"SeparateRGB: Invalid channel {self.channel}")
+        # HSR: Blender's Separate Color node has THREE modes and this plugin implemented
+        # one. The other two are not relabelled channels -- HSL's lightness is the midpoint
+        # of the extremes where HSV's value is the maximum, and their saturations differ
+        # entirely -- so exporting either as RGB would have been a different picture.
+        self.mode = str(props.get('mode', 'RGB')).upper()
+        if self.mode not in ('RGB', 'HSV', 'HSL'):
+            raise ValueError(f"SeparateRGB: Invalid mode {self.mode}")
 
     def traverse(self, cb):
         cb.put('input', self.texture, mi.ParamFlags.Differentiable)
@@ -31,6 +40,10 @@ class SeparateRGB(mi.Texture):
 
     def _eval_channel(self, si, active):
         color = self.texture.eval_3(si, active)
+        if self.mode == 'HSV':
+            color = rgb_to_hsv(color)
+        elif self.mode == 'HSL':
+            color = rgb_to_hsl(color)
         return color[{ 'r': 0, 'g': 1, 'b': 2 }[self.channel]]
 
     def eval(self, si, active):
@@ -52,6 +65,6 @@ class SeparateRGB(mi.Texture):
         return self.texture.is_spatially_varying()
 
     def to_string(self):
-        return f'Separate RGB[input={self.texture}, channel={self.channel}]'
+        return f'Separate RGB[input={self.texture}, mode={self.mode}, channel={self.channel}]'
 
 mi.register_texture('separate_rgb', lambda props: SeparateRGB(props))

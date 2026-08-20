@@ -7,6 +7,7 @@ if mi.variant() is not None and not mi.variant().startswith('scalar'):
     submodules = [
         'brightness_contrast',
         'bump',
+        'blackbody',
         'clamp',
         'color_ramp',
         'combine_color',
@@ -27,7 +28,8 @@ if mi.variant() is not None and not mi.variant().startswith('scalar'):
         'texture_coordinate',
         'udim',
         'uv_wrapper',
-        'vector_math'
+        'vector_math',
+        'white_noise'
     ]
 
     # Are we importing the submodules for the first time or reloading them?

@@ -4,50 +4,12 @@ import drjit as dr
 import mitsuba as mi
 
 
-def wrap(a, b):
-    """Floored modulo: the result carries `b`'s sign, so a NEGATIVE input WRAPS.
-
-    The helper this replaces was `(a - Int32(a)) + Int32(a) % b`, and its caller reached for
-    `dr.abs` to keep it in range. `abs` REFLECTS a negative hue instead of wrapping it, which
-    maps -t to +t and therefore swaps green and blue for every hue the Hue input pushes below
-    zero. Measured, not deduced: with hue 0.32 on a red-green sweep, Cycles drew (0.76, 0,
-    0.79) where this plugin drew (0.76, 0.79, 0).
-    """
-    return a - b * dr.floor(a / b)
-
-
-def rgb2hsv(rgb):
-    """Blender's `rgb_to_hsv`, hue in [0, 1].
-
-    Rewritten from the six-sector cascade of masked assignments this replaces. That form
-    relied on the sector predicates being mutually exclusive at the boundaries, where they
-    are not (`R >= G >= B` and `R >= B >= G` are both true when G == B), so a later branch
-    could silently overwrite an earlier one. This states the sextant once.
-    """
-    r, g, b = rgb.x, rgb.y, rgb.z
-    mx = dr.maximum(r, dr.maximum(g, b))
-    mn = dr.minimum(r, dr.minimum(g, b))
-    delta = mx - mn
-    safe_delta = dr.select(delta > 0.0, delta, 1.0)
-    h_r = wrap((g - b) / safe_delta, 6.0)
-    h_g = (b - r) / safe_delta + 2.0
-    h_b = (r - g) / safe_delta + 4.0
-    h = dr.select(delta <= 0.0, 0.0,
-                  dr.select(mx == r, h_r, dr.select(mx == g, h_g, h_b))) / 6.0
-    s = dr.select(mx > 0.0, delta / dr.select(mx > 0.0, mx, 1.0), 0.0)
-    return mi.Color3f(h, s, mx)
-
-
-def hsv2rgb(hsv):
-    """Blender's `hsv_to_rgb`: three clamped triangle waves of the hue, hue in [0, 1]."""
-    h = wrap(hsv.x, 1.0)
-    s, v = hsv.y, hsv.z
-    nr = dr.clip(dr.abs(h * 6.0 - 3.0) - 1.0, 0.0, 1.0)
-    ng = dr.clip(2.0 - dr.abs(h * 6.0 - 2.0), 0.0, 1.0)
-    nb = dr.clip(2.0 - dr.abs(h * 6.0 - 4.0), 0.0, 1.0)
-    return mi.Color3f(((nr - 1.0) * s + 1.0) * v,
-                      ((ng - 1.0) * s + 1.0) * v,
-                      ((nb - 1.0) * s + 1.0) * v)
+# HSR: these three used to be DEFINED here and imported by `mix_color` across a plugin
+# boundary. They are Blender's, they are shared by four nodes, and they now live in
+# `blender_color` with the HSL pair beside them.
+from .blender_color import hsv_to_rgb as hsv2rgb
+from .blender_color import rgb_to_hsv as rgb2hsv
+from .blender_color import wrap01 as wrap
 
 
 class HueSaturationValue(mi.Texture):

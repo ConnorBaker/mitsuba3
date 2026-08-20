@@ -15,7 +15,8 @@
 import drjit as dr
 import mitsuba as mi
 
-import struct
+from .blender_hash import (hash_uint, hash_uint2, hash_uint3, hash_uint4,
+                           py_hash_float_to_float, py_hash_float2_to_float)
 
 NOISE_TYPES = ('FBM', 'MULTIFRACTAL', 'HETERO_TERRAIN',
                'RIDGED_MULTIFRACTAL', 'HYBRID_MULTIFRACTAL')
@@ -33,117 +34,15 @@ NOISE_REPEAT = 100000.0
 NOISE_PRECISION_THRESHOLD = 1000000.0
 
 
-# ---------------------------------------------------------------------------------------
-# Jenkins lookup3, as Cycles spells it. The hash is the identity of the noise: change it and
-# every value changes while the picture still looks like noise.
-# ---------------------------------------------------------------------------------------
-
-def _rot(x, k):
-    return (x << k) | (x >> (32 - k))
-
-
-def _final(a, b, c):
-    c ^= b; c -= _rot(b, 14)
-    a ^= c; a -= _rot(c, 11)
-    b ^= a; b -= _rot(a, 25)
-    c ^= b; c -= _rot(b, 16)
-    a ^= c; a -= _rot(c, 4)
-    b ^= a; b -= _rot(a, 14)
-    c ^= b; c -= _rot(b, 24)
-    return c
-
-
-def _mix(a, b, c):
-    a -= c; a ^= _rot(c, 4);  c += b
-    b -= a; b ^= _rot(a, 6);  a += c
-    c -= b; c ^= _rot(b, 8);  b += a
-    a -= c; a ^= _rot(c, 16); c += b
-    b -= a; b ^= _rot(a, 19); a += c
-    c -= b; c ^= _rot(b, 4);  b += a
-    return a, b, c
-
-
-def _seed(n):
-    # `a = b = c = 0xdeadbeef + (n << 2) + 13` -- the length is mixed into the seed, which is
-    # why hash_uint2(x, y) is not hash_uint3(x, y, 0).
-    return (0xdeadbeef + (n << 2) + 13) & 0xffffffff
-
-
-def hash_uint(kx):
-    s = _seed(1)
-    a, b, c = mi.UInt32(s) + kx, mi.UInt32(s), mi.UInt32(s)
-    return _final(a, b, c)
-
-
-def hash_uint2(kx, ky):
-    s = _seed(2)
-    a, b, c = mi.UInt32(s) + kx, mi.UInt32(s) + ky, mi.UInt32(s)
-    return _final(a, b, c)
-
-
-def hash_uint3(kx, ky, kz):
-    s = _seed(3)
-    a, b, c = mi.UInt32(s) + kx, mi.UInt32(s) + ky, mi.UInt32(s) + kz
-    return _final(a, b, c)
-
-
-def hash_uint4(kx, ky, kz, kw):
-    s = _seed(4)
-    a, b, c = _mix(mi.UInt32(s) + kx, mi.UInt32(s) + ky, mi.UInt32(s) + kz)
-    return _final(a + kw, b, c)
-
-
-def _py_hash_uint2(kx, ky):
-    """The same hash on plain Python ints, for the compile-time distortion offsets."""
-    M = 0xffffffff
-
-    def rot(x, k):
-        return ((x << k) | (x >> (32 - k))) & M
-
-    a = (_seed(2) + kx) & M
-    b = (_seed(2) + ky) & M
-    c = _seed(2)
-    c = (c ^ b) & M; c = (c - rot(b, 14)) & M
-    a = (a ^ c) & M; a = (a - rot(c, 11)) & M
-    b = (b ^ a) & M; b = (b - rot(a, 25)) & M
-    c = (c ^ b) & M; c = (c - rot(b, 16)) & M
-    a = (a ^ c) & M; a = (a - rot(c, 4)) & M
-    b = (b ^ a) & M; b = (b - rot(a, 14)) & M
-    c = (c ^ b) & M; c = (c - rot(b, 24)) & M
-    return c
-
-
-def _float_bits(x):
-    return struct.unpack('<I', struct.pack('<f', x))[0]
-
-
-def _random_offset_component(seed, k):
-    # `100.0f + hash_float2_to_float(make_float2(seed, k)) * 100.0f`, and
-    # `hash_float2_to_float` hashes the IEEE BIT PATTERNS of the two floats, not their values.
-    h = _py_hash_uint2(_float_bits(float(seed)), _float_bits(float(k)))
-    return 100.0 + (h * (1.0 / float(0xFFFFFFFF))) * 100.0
-
-
 def random_offset(seed, n):
-    """`random_float{n}_offset(seed)` -- a constant, so it is evaluated once at import."""
-    if n == 1:
-        # The 1D variant uses `hash_float_to_float`, i.e. the ONE-argument hash, whose seed
-        # constant differs. It is not `random_offset(seed, 2)[0]`.
-        M = 0xffffffff
+    """`random_float{n}_offset(seed)` -- `100 + hash(...) * 100`, a compile-time constant.
 
-        def rot(x, k):
-            return ((x << k) | (x >> (32 - k))) & M
-        a = (_seed(1) + _float_bits(float(seed))) & M
-        b = c = _seed(1)
-        c = (c ^ b) & M; c = (c - rot(b, 14)) & M
-        a = (a ^ c) & M; a = (a - rot(c, 11)) & M
-        b = (b ^ a) & M; b = (b - rot(a, 25)) & M
-        c = (c ^ b) & M; c = (c - rot(b, 16)) & M
-        a = (a ^ c) & M; a = (a - rot(c, 4)) & M
-        b = (b ^ a) & M; b = (b - rot(a, 14)) & M
-        c = (c ^ b) & M; c = (c - rot(b, 24)) & M
-        return (100.0 + (c * (1.0 / float(M))) * 100.0,)
-    return tuple(_random_offset_component(seed, k) for k in range(n))
+    The 1D variant hashes with the ONE-argument lookup3, whose seed constant differs from
+    the two-argument one, so it is NOT `random_offset(seed, 2)[0]`.
+    """
+    if n == 1:
+        return (100.0 + py_hash_float_to_float(seed) * 100.0,)
+    return tuple(100.0 + py_hash_float2_to_float(seed, k) * 100.0 for k in range(n))
 
 
 # ---------------------------------------------------------------------------------------

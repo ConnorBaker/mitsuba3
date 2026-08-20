@@ -3,14 +3,20 @@ from __future__ import annotations # Delayed parsing of type annotations
 import drjit as dr
 import mitsuba as mi
 
+from .blender_color import hsl_to_rgb, hsv_to_rgb
+
 class CombineColor(mi.Texture):
     '''
     RGB to BW Blender shader node texture.
     '''
     def __init__(self, props):
         mi.Texture.__init__(self, props)
-        self.mode = props.get('mode', 'RGB')
-        assert self.mode == 'RGB', self.mode
+        self.mode = str(props.get('mode', 'RGB')).upper()
+        if self.mode not in ('RGB', 'HSV', 'HSL'):
+            # HSR: was `assert self.mode == 'RGB'`, i.e. an AssertionError with no message
+            # in the middle of a scene load. HSV and HSL are now implemented rather than
+            # refused.
+            raise ValueError(f"CombineColor: Invalid mode {self.mode}")
         # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
         # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
         # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
@@ -32,11 +38,20 @@ class CombineColor(mi.Texture):
         return mi.UnpolarizedSpectrum(self.eval_3(si, active))
 
     def eval_3(self, si, active):
-        return mi.Color3f(
+        c = mi.Color3f(
             self.R.eval_1(si, active),
             self.G.eval_1(si, active),
             self.B.eval_1(si, active)
         )
+        if self.mode == 'HSV':
+            return hsv_to_rgb(c)
+        if self.mode == 'HSL':
+            return hsl_to_rgb(c)
+        return c
+
+    def eval_1(self, si, active):
+        c = self.eval_3(si, active)
+        return (c.x + c.y + c.z) / 3.0
 
     def mean(self):
         return self.color.mean() # TODO best effort

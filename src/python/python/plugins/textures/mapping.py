@@ -30,15 +30,20 @@ class Mapping(mi.Texture):
     contains 26 of them. A missing plugin is a visible error; a dropped input is a wrong
     picture, which is worse.
 
-    The three supported modes are Blender's, verbatim:
+    All four modes are Blender's, verbatim (`kernel/svm/mapping_util.h`):
 
         POINT    rot * (v * scale) + location
-        TEXTURE  ((v - location) * rot^T) / scale        (the inverse of POINT)
-        VECTOR   rot * (v * scale)                       (a direction: no translation)
+        TEXTURE  safe_divide(rot^T * (v - location), scale)     (the inverse of POINT)
+        VECTOR   rot * (v * scale)                              (a direction: no translation)
+        NORMAL   normalize(rot * safe_divide(v, scale))
 
-    NORMAL is deliberately absent rather than guessed: it involves an inverse-transpose whose
-    exact Blender spelling this implementation has not been checked against, and a plausible
-    wrong normal transform is exactly the kind of error that renders without complaint.
+    NORMAL used to be refused here on the grounds that it "involves an inverse-transpose
+    whose exact Blender spelling this implementation has not been checked against". Checked:
+    it does not. Cycles divides by the scale rather than multiplying, rotates, and
+    normalises -- which is the inverse-transpose only because a rotation's inverse is its
+    transpose and a diagonal scale's inverse-transpose is its reciprocal. The refusal was
+    right in kind (do not guess a normal transform) and wrong in fact, and the fix was to
+    read the source rather than to reason about it.
 
     Attributes
     ----------
@@ -47,10 +52,10 @@ class Mapping(mi.Texture):
     location, rotation, scale : mi.Texture
         The transform, each linkable exactly as in Blender. Rotation is Euler XYZ, radians.
     vector_type : str
-        'POINT' (default), 'TEXTURE' or 'VECTOR'.
+        'POINT' (default), 'TEXTURE', 'VECTOR' or 'NORMAL'.
     '''
 
-    SUPPORTED = ('POINT', 'TEXTURE', 'VECTOR')
+    SUPPORTED = ('POINT', 'TEXTURE', 'VECTOR', 'NORMAL')
 
     def __init__(self, props):
         mi.Texture.__init__(self, props)
@@ -100,6 +105,15 @@ class Mapping(mi.Texture):
             out = mi.Vector3f(dr.select(scl.x != 0.0, rotated.x / scl.x, 0.0),
                               dr.select(scl.y != 0.0, rotated.y / scl.y, 0.0),
                               dr.select(scl.z != 0.0, rotated.z / scl.z, 0.0))
+        elif self.vector_type == 'NORMAL':
+            # DIVIDES by the scale -- a normal transforms by the inverse transpose, and for a
+            # diagonal scale that is the reciprocal, not the scale itself.
+            d = mi.Vector3f(dr.select(scl.x != 0.0, v.x / scl.x, 0.0),
+                            dr.select(scl.y != 0.0, v.y / scl.y, 0.0),
+                            dr.select(scl.z != 0.0, v.z / scl.z, 0.0))
+            out = mi.Vector3f(dr.dot(r0, d), dr.dot(r1, d), dr.dot(r2, d))
+            n = dr.norm(out)
+            out = dr.select(n > 0.0, out / dr.select(n > 0.0, n, 1.0), 0.0)
         else:
             s = v * scl
             out = mi.Vector3f(dr.dot(r0, s), dr.dot(r1, s), dr.dot(r2, s))
