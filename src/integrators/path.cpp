@@ -37,9 +37,12 @@ Path tracer (:monosp:`path`)
      :monosp:`glossy_bounces` and :monosp:`transmission_bounces`. They partition
      reflect-vs-transmit first, exactly as Cycles does: a transmission is charged to
      :monosp:`transmission_max_depth` and to nothing else, so a *diffuse* transmission
-     (translucency) does not spend the diffuse budget. Exceeding any budget does not stop
-     the path immediately -- the next surface is still shaded, its emission added and its
-     direct lighting sampled, and the path ends there. (Default: -1 each, i.e. unlimited)
+     (translucency) does not spend the diffuse budget. Exceeding a budget does not stop the
+     path immediately: the next surface is still reached and its emission still collected,
+     but it gets no direct lighting and no further bounce -- the same truncation
+     :monosp:`max_depth` already performs. Cycles compares each count *after* incrementing
+     it, so a budget of 0 and a budget of 1 both permit exactly one bounce of that kind.
+     (Default: -1 each, i.e. unlimited)
 
  * - rr_depth
    - |int|
@@ -304,7 +307,20 @@ public:
             }
 
             // Continue tracing the path at this point?
-            Bool active_next = (ls.depth + 1 < m_max_depth) && si.is_valid();
+            /* `stop_next` carries an exhausted per-lobe budget forward by one vertex, and
+               it belongs HERE, folded into `active_next`, rather than after the bounce.
+               Cycles' terminate flags are all covered by `PATH_RAY_TERMINATE`, and
+               `surface_shader_prepare_closures` reads that as `max_closures = 0`: the next
+               surface is reached with NO closures at all. Its emission is still added, but
+               there is nothing to sample a light against and nothing to scatter with -- no
+               direct lighting, no bounce. That is exactly what `active_next` already means
+               for `max_depth`, so the two truncations are the same truncation and are
+               spelled the same way.
+
+               Placing it after the bounce instead -- the obvious reading of "terminate on
+               the NEXT surface" -- grants the terminal vertex a direct-lighting contribution
+               Cycles never computes, which on an interior is a visible over-brightening. */
+            Bool active_next = (ls.depth + 1 < m_max_depth) && si.is_valid() && !ls.stop_next;
 
             if (dr::none_or<false>(active_next)) {
                 ls.active = active_next;
@@ -450,19 +466,20 @@ public:
             ls.active = active_next && (!rr_active || rr_continue) &&
                         (throughput_max != 0.f);
 
-            /* Budget termination, in two steps, because a budget running out does NOT stop
-               the path where it ran out. Cycles raises `PATH_RAY_TERMINATE_ON_NEXT_SURFACE`,
-               and `integrate_surface_terminate` is consulted only AFTER the next surface has
-               been shaded -- its emission added, its direct lighting sampled. So the flag
-               raised at the bottom of one iteration is spent at the bottom of the NEXT one,
-               and that ordering is the whole content of `stop_next`. Testing the counters
-               directly here instead would drop a surface's emission and its NEE contribution,
-               which is a darkening the size of one whole bounce.
+            /* Raise the flag; `active_next` above spends it on the next iteration. A budget
+               running out does not stop the path where it ran out -- the next surface is
+               still reached and its emission still collected.
 
-               `>=` and not `>`: Cycles compares the count AFTER incrementing it. */
+               `>=` and not `>`: Cycles compares the count AFTER incrementing it, which is why
+               a budget of 0 and a budget of 1 both allow exactly one bounce of that kind.
+
+               Known divergence, stated rather than hidden: Cycles distinguishes
+               `TERMINATE_ON_NEXT_SURFACE` (the transparent budget) from
+               `TERMINATE_AFTER_TRANSPARENT` (the lobe budgets), and the latter keeps crossing
+               transparent surfaces, collecting emission, until it meets an opaque one. This
+               stops at the first surface of either kind. The two agree wherever no transparent
+               surface stands between the exhausted vertex and the next opaque one. */
             if (m_lobe_budgets) {
-                ls.active &= !ls.stop_next;
-
                 /* Each comparison is gated on having just CHARGED that counter, which is
                    not decoration -- it is where Cycles puts it. There the test lives inside
                    the branch that did the increment, so a budget can only ever be tripped by
