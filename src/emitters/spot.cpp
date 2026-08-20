@@ -30,6 +30,14 @@ Spot light source (:monosp:`spot`)
    - |float|
    - Subtended angle of the central beam portion (Default: :math:`cutoff_angle \times 3/4`)
 
+ * - blender_blend
+   - |float|
+   - Blender/Cycles falloff instead of the linear ramp: this is Blender's ``spot_blend`` in
+     [0, 1], and the profile becomes
+     :math:`\mathrm{smoothstep}\big((\cos\theta - \cos\theta_c)\,/\,((1-\cos\theta_c)\,b)\big)`
+     -- a smoothstep in cosine space rather than a linear ramp in angle. Mutually exclusive
+     with ``beam_width``.
+
  * - texture
    - |texture|
    - An optional texture to be projected along the spot light. This must be spatially varying (e.g. have bitmap as type).
@@ -103,7 +111,32 @@ public:
         }
 
         ScalarFloat cutoff_angle = props.get<ScalarFloat>("cutoff_angle", 20.0f);
-        m_beam_width   = props.get<ScalarFloat>("beam_width", cutoff_angle * 3.0f / 4.0f);
+        /* HSR: Blender's spot does NOT ramp linearly in angle. `spot_light_attenuation`
+           (intern/cycles/kernel/light/spot.h) is
+               smoothstepf((cos_theta - cos_half_spot_angle) * spot_smooth)
+           with `spot_smooth = 1 / ((1 - cos_half_spot_angle) * blend)`
+           (SpotLight::copy_to_kernel, intern/cycles/scene/light.cpp) -- a smoothstep in
+           COSINE space, not a linear ramp in ANGLE. The two agree only at the two ends, and
+           the exporter that fed this plugin had to invent a `beam_width` to approximate the
+           middle. `blender_blend` is Blender's `spot_blend` in [0, 1] and selects the exact
+           curve; `cutoff_angle` is then Blender's `spot_size / 2`, which is where BOTH
+           curves reach zero. */
+        m_blender_falloff = props.has_property("blender_blend");
+        m_blender_blend   = props.get<ScalarFloat>("blender_blend", 0.f);
+        if (m_blender_falloff) {
+            if (m_blender_blend < 0.f || m_blender_blend > 1.f)
+                Throw("The parameter 'blender_blend' must lie in [0, 1] (it is Blender's "
+                      "`spot_blend`), but is %f.", m_blender_blend);
+            /* The linear ramp is switched off rather than left to interact: with
+               beam_width == cutoff_angle the legacy curve is a hard step at the cutoff,
+               which is exactly where the Blender curve already reaches zero. */
+            m_beam_width = cutoff_angle;
+            if (props.has_property("beam_width"))
+                Throw("'beam_width' and 'blender_blend' are two different falloff "
+                      "parameterisations; specify one or the other, not both.");
+        } else {
+            m_beam_width = props.get<ScalarFloat>("beam_width", cutoff_angle * 3.0f / 4.0f);
+        }
         m_cutoff_angle = cutoff_angle;
         update();
     }
@@ -143,6 +176,14 @@ public:
     Float falloff_curve(const Vector3f &d, Mask /*active*/) const {
         Vector3f local_dir = dr::normalize(d);
         Float cos_theta    = local_dir.z();
+
+        if (m_blender_falloff) {
+            /* `smoothstepf` (intern/cycles/util/math_base.h) is the CLAMPED cubic:
+               0 for f <= 0, 1 for f >= 1, and 3f^2 - 2f^3 in between. */
+            Float t = dr::clip((cos_theta - m_cos_cutoff_angle) * m_spot_smooth, 0.f, 1.f);
+            return t * t * (3.f - 2.f * t);
+        }
+
         Float beam_res = dr::select(
             cos_theta >= m_cos_beam_width, 1.f,
             (m_cutoff_angle_rad - dr::acos(cos_theta)) * m_inv_transition_width);
@@ -305,20 +346,26 @@ private:
         m_cos_beam_width       = dr::cos(beam_width_rad);
         Assert(dr::all(m_cutoff_angle_rad >= beam_width_rad));
         m_uv_factor = dr::tan(m_cutoff_angle_rad);
+        /* Blender's own expression, verbatim: a `blend` of 0 gives an infinite slope, i.e.
+           the hard-edged cone, which is what Cycles renders too. */
+        m_spot_smooth = 1.0f / ((1.0f - m_cos_cutoff_angle) * m_blender_blend);
 
         dr::make_opaque(m_beam_width, m_cutoff_angle, beam_width_rad,
                         m_cutoff_angle_rad, m_uv_factor, m_cos_beam_width,
-                        m_cos_cutoff_angle, m_inv_transition_width);
+                        m_cos_cutoff_angle, m_inv_transition_width, m_spot_smooth);
     }
 
     ref<Texture> m_intensity;
     ref<Texture> m_texture;
     Float m_beam_width, m_cutoff_angle, m_cutoff_angle_rad, m_uv_factor;
     Float m_cos_beam_width, m_cos_cutoff_angle, m_inv_transition_width;
+    bool m_blender_falloff;
+    Float m_blender_blend, m_spot_smooth;
 
     MI_TRAVERSE_CB(Base, m_intensity, m_texture, m_beam_width, m_cutoff_angle,
                    m_cutoff_angle_rad, m_uv_factor, m_cos_beam_width,
-                   m_cos_cutoff_angle, m_inv_transition_width)
+                   m_cos_cutoff_angle, m_inv_transition_width, m_blender_blend,
+                   m_spot_smooth)
 };
 
 MI_EXPORT_PLUGIN(SpotLight)
