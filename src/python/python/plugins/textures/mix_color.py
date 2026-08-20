@@ -3,10 +3,32 @@ from __future__ import annotations # Delayed parsing of type annotations
 import drjit as dr
 import mitsuba as mi
 
+from .hue_saturation import rgb2hsv, hsv2rgb
+
 blend_type_mix = 'MIX'
 blend_type_mul = 'MULTIPLY'
 blend_type_screen = 'SCREEN'
 blend_type_overlay = 'OVERLAY'
+
+
+def _safe_div(a, b):
+    return dr.select(b != 0.0, a / dr.select(b != 0.0, b, 1.0), 0.0)
+
+
+def _hsv_blend(a, b, fac, take_h, take_s, take_v):
+    """Blender's HUE / SATURATION / COLOR / VALUE modes.
+
+    All four are the same shape: convert both operands to HSV, take some components from B
+    and the rest from A, convert back, then lerp by `fac`. Blender additionally leaves A
+    untouched where B is fully desaturated for the hue-carrying modes, which falls out of
+    taking B's saturation only when the mode asks for it.
+    """
+    hsv_a = rgb2hsv(mi.Color3f(a))
+    hsv_b = rgb2hsv(mi.Color3f(b))
+    out = mi.Color3f(dr.select(take_h, hsv_b.x, hsv_a.x),
+                     dr.select(take_s, hsv_b.y, hsv_a.y),
+                     dr.select(take_v, hsv_b.z, hsv_a.z))
+    return dr.lerp(mi.Color3f(a), hsv2rgb(out), fac)
 
 class Mix(mi.Texture):
     '''
@@ -79,6 +101,12 @@ class Mix(mi.Texture):
         return result
     
     def blend(self, mode, a, b, fac):
+        # HSR: this used to implement four of Blender's eighteen modes and raise -- at EVAL
+        # time, i.e. per sample during the render -- for the other fourteen. Each addition
+        # below is Blender's `ramp_blend` arithmetic and each is checked against Cycles by
+        # rendering the same node graph through both engines, because a blend formula that is
+        # merely plausible produces a picture, not an error.
+        facm = mi.Float(1) - fac
         if mode == blend_type_mix:
             res = (1 - fac) * a + fac * b
         elif mode == blend_type_screen:
@@ -86,6 +114,45 @@ class Mix(mi.Texture):
             res = mi.Color3f(1) - (mi.Color3f(fac_inv) + fac * (mi.Color3f(1) - b)) * (mi.Color3f(1) - a)
         elif mode == blend_type_mul:
             res = dr.minimum(a * ((mi.Color3f(1) - fac) + fac * b), mi.Color3f(1))
+        elif mode == 'SUBTRACT':
+            res = mi.Color3f(a) - fac * mi.Color3f(b)
+        elif mode == 'DIVIDE':
+            res = facm * mi.Color3f(a) + fac * _safe_div(mi.Color3f(a), mi.Color3f(b))
+        elif mode == 'DIFFERENCE':
+            res = facm * mi.Color3f(a) + fac * dr.abs(mi.Color3f(a) - mi.Color3f(b))
+        elif mode == 'DARKEN':
+            res = dr.minimum(mi.Color3f(a), mi.Color3f(b)) * fac + mi.Color3f(a) * facm
+        elif mode == 'LIGHTEN':
+            res = dr.maximum(fac * mi.Color3f(b), mi.Color3f(a))
+        elif mode == 'EXCLUSION':
+            ca, cb = mi.Color3f(a), mi.Color3f(b)
+            res = dr.maximum(facm * ca + fac * (ca + cb - 2.0 * ca * cb), mi.Color3f(0))
+        elif mode == 'DODGE':
+            ca, cb = mi.Color3f(a), mi.Color3f(b)
+            tmp = mi.Color3f(1) - fac * cb
+            quot = _safe_div(ca, tmp)
+            res = dr.select(ca == 0.0, ca,
+                            dr.select(tmp <= 0.0, mi.Color3f(1), dr.minimum(quot, mi.Color3f(1))))
+        elif mode == 'BURN':
+            ca, cb = mi.Color3f(a), mi.Color3f(b)
+            tmp = facm + fac * cb
+            val = mi.Color3f(1) - _safe_div(mi.Color3f(1) - ca, tmp)
+            res = dr.select(tmp <= 0.0, mi.Color3f(0), dr.clip(val, 0.0, 1.0))
+        elif mode == 'LINEAR_LIGHT':
+            ca, cb = mi.Color3f(a), mi.Color3f(b)
+            res = ca + fac * dr.select(cb > 0.5, 2.0 * (cb - 0.5), 2.0 * cb - 1.0)
+        elif mode == 'SOFT_LIGHT':
+            ca, cb = mi.Color3f(a), mi.Color3f(b)
+            scr = mi.Color3f(1) - (mi.Color3f(1) - cb) * (mi.Color3f(1) - ca)
+            res = facm * ca + fac * ((mi.Color3f(1) - ca) * cb * ca + ca * scr)
+        elif mode == 'HUE':
+            res = _hsv_blend(a, b, fac, True, False, False)
+        elif mode == 'SATURATION':
+            res = _hsv_blend(a, b, fac, False, True, False)
+        elif mode == 'COLOR':
+            res = _hsv_blend(a, b, fac, True, True, False)
+        elif mode == 'VALUE':
+            res = _hsv_blend(a, b, fac, False, False, True)
         elif mode == blend_type_overlay:
             fac_inv = mi.Float(1) - fac
             res = mi.Color3f(0)

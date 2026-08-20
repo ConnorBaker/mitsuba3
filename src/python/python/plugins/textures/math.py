@@ -84,7 +84,7 @@ class Math(mi.Texture):
     def traverse(self, cb):
         cb.put('input_0', self.input_0, +mi.ParamFlags.Differentiable)
         cb.put('input_1', self.input_1, +mi.ParamFlags.Differentiable)
-        cb.put('input_2', self.input_1, +mi.ParamFlags.Differentiable)
+        cb.put('input_2', self.input_2, +mi.ParamFlags.Differentiable)  # HSR: was input_1
 
     def eval(self, si, active):
         return mi.UnpolarizedSpectrum(self.process(

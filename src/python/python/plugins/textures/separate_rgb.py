@@ -10,7 +10,10 @@ class SeparateRGB(mi.Texture):
     '''
     def __init__(self, props):
         mi.Texture.__init__(self, props)
-        self.texture = props.get('input')
+        # HSR: was `props.get('input')`, which does NOT promote a constant to a Texture --
+        # so a Separate Color fed by a constant colour produced a Color3f here and faulted on
+        # `.eval_3` at render time. `get_texture` promotes.
+        self.texture = props.get_texture('input', 0.0)
         self.channel = props.get('channel', 'r')
         if self.channel not in ['r', 'g', 'b']:
             raise ValueError(f"SeparateRGB: Invalid channel {self.channel}")
