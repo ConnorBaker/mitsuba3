@@ -15,7 +15,7 @@ class Bump(mi.Texture):
     the same socket a Normal Map node would feed -- including when a Normal Map feeds THIS
     node's `normal` input, which is how the two are chained in Blender.
 
-    THE DIFFERENCING SCALE IS THE WHOLE BALLGAME, AND CYCLES' FOOTPRINT IS ISOTROPIC.
+    THE DIFFERENCING SCALE IS THE WHOLE BALLGAME, AND IT IS SET OUTSIDE THIS PLUGIN.
     Cycles computes `surfgrad = (h_x - h_c)*Rx + (h_y - h_c)*Ry` with `Rx = dP.dy x N`,
     `Ry = N x dP.dx`, `det = dP.dx . Rx`, then
     `N' = normalize(fw*|det|*N - dist*sign(det)*surfgrad)` (`kernel/svm/displace.h`), where
@@ -23,7 +23,8 @@ class Bump(mi.Texture):
     and `dP.dy*fw` -- the offset is applied at the SOURCE nodes, e.g.
     `data.val += data.dx * node.bump_filter_width` in `kernel/svm/tex_coord.h`.
 
-    Two successive readings of that code were wrong here, and the second is the subtle one:
+    Three readings of that code were wrong here. All three are kept, because which
+    quantity is WRONG is the whole content of this plugin:
 
     1. This docstring once argued that substituting (u, v) for (x, y) is equivalent, because
        `surfgrad/det` is the intrinsic tangential gradient and therefore basis-independent.
@@ -34,19 +35,30 @@ class Bump(mi.Texture):
        implementation was flat to four digits. A texel is the same size however many pixels
        cover it.
 
-    2. The obvious fix -- feed `si.duv_dx` / `si.duv_dy` straight in -- is ALSO wrong, and
-       measurably so: it moved the same ladder to 0.6415 / 0.6915 / 0.7596 / 0.8355, i.e.
-       from 35% too bright to 30% too DARK. Cycles never uses the anisotropic differential
-       here. `svm_node_set_bump` reads `differential_from_compact(sd->Ng, sd->dP)`, and
-       `sd->dP` is the COMPACTED scalar `0.5*(|dP.dx| + |dP.dy|)`
-       (`differential_make_compact`); `differential_from_compact` then rebuilds an
-       ISOTROPIC, orthonormal pair `(r*ex, r*ey)` in the tangent plane from
-       `make_orthonormals(Ng)`. So the footprint is a CIRCLE of radius r, not the true
-       screen-space parallelogram. That is not a detail: `det` is the parallelogram AREA, so
-       at grazing incidence the true differential has `det << r^2` while `|surfgrad|` does
-       not shrink with it, and the second term of `N'` runs away -- exactly the 30%
-       over-perturbation measured above. Reproduced here literally, including
-       `make_orthonormals`' own basis choice and its `N.x != N.y || N.x != N.z` branch.
+    2. Feeding `si.duv_dx` / `si.duv_dy` straight in is the right MECHANISM at the wrong
+       SCALE. It moved the ladder to 0.6415 / 0.6915 / 0.7596 / 0.8355 -- from 35% too
+       bright to 30% too dark, and still not tracking. The cause is not in this plugin:
+       `SamplingIntegrator::render` shrinks the sensor differential by `rsqrt(spp)`, which
+       reconstructs a pixel-wide filter for a LINEAR consumer and does not for a normal
+       perturbation. `path.cpp` now divides by `ray_.diff_scale` to hand this plugin the
+       one-pixel footprint Cycles carries; see the long comment there for the spp sweep
+       that pins it (mi/cy 1.0998 at spp 1, falling to 0.6720 at spp 256, with the Cycles
+       arm spread 0.000000).
+
+    3. Cycles' footprint is ISOTROPIC, and this turned out NOT to be the level error --
+       recorded because the wrong diagnosis is the useful part. `svm_node_set_bump` reads
+       `differential_from_compact(sd->Ng, sd->dP)`, and `sd->dP` is the COMPACTED SCALAR
+       `0.5*(|dP.dx| + |dP.dy|)` (`differential_make_compact`); `differential_from_compact`
+       rebuilds an isotropic orthonormal pair `(r*ex, r*ey)` from `make_orthonormals(Ng)`.
+       So the footprint is a CIRCLE of radius r, not the screen-space parallelogram. The
+       argument for why that MUST matter was clean -- `det` is the parallelogram AREA, so at
+       grazing incidence the true differential has `det << r^2` while `|surfgrad|` does not
+       shrink with it, and the second term of `N'` should run away. Measured, it does not:
+       switching to the isotropic reconstruction moved the same ladder to
+       0.5829 / 0.6853 / 0.7532 / 0.8333, i.e. nothing at 80/160/320 and slightly WORSE at
+       40. It is kept anyway, on the only ground that survives -- it is what Cycles
+       computes, verified against a transcription of the kernel to 3e-12 -- and not on the
+       ground that it fixed a brightness error, which it did not.
 
     Everything else is Cycles' line for line: FORWARD differences (`h_x - h_c`, not a
     central difference), `Rx`/`Ry`/`det` built from `normal_in` rather than from `Ng` (they

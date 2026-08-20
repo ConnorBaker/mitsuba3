@@ -90,14 +90,33 @@ struct RayDifferential : Ray<Point_, Spectrum_> {
     Vector d_x, d_y;
     bool has_differentials = false;
 
+    /**
+     * \brief Cumulative factor already applied by \ref scale_differential().
+     *
+     * The sensor emits a ONE-PIXEL differential, but \c SamplingIntegrator::render()
+     * immediately shrinks it by \c rsqrt(spp) so that a stochastic average over the
+     * pixel's samples reconstructs a pixel-wide filter. That is exactly right for a
+     * LINEAR consumer -- a mip-mapped texture lookup -- and exactly wrong for a
+     * non-linear one, because the mean of N perturbed shading normals is not the normal
+     * you get from perturbing once over the whole pixel.
+     *
+     * Recording the factor is what lets such a consumer ask for the quantity it actually
+     * needs. Dividing a differential-derived quantity by \c diff_scale recovers the
+     * one-pixel footprint, which is what Cycles carries unconditionally (its \c ray->dP
+     * does not depend on the sample count at all).
+     */
+    Float diff_scale = (ScalarFloat) 1.f;
+
     /// Construct from a Ray instance
     RayDifferential(const Base &ray)
-        : Base(ray), o_x(0), o_y(0), d_x(0), d_y(0), has_differentials(false) {}
+        : Base(ray), o_x(0), o_y(0), d_x(0), d_y(0), has_differentials(false),
+          diff_scale((ScalarFloat) 1.f) {}
 
     /// Construct a new ray (o, d) at time 'time'
     RayDifferential(const Point &o_, const Vector &d_, Float time_ = (ScalarFloat) 0.f,
                     const Wavelength &wavelengths_ = Wavelength())
-        : o_x(0), o_y(0), d_x(0), d_y(0), has_differentials(false) {
+        : o_x(0), o_y(0), d_x(0), d_y(0), has_differentials(false),
+          diff_scale((ScalarFloat) 1.f) {
         o           = o_;
         d           = d_;
         time        = time_;
@@ -109,10 +128,11 @@ struct RayDifferential : Ray<Point_, Spectrum_> {
         o_y = dr::fmadd(o_y - o, amount, o);
         d_x = dr::fmadd(d_x - d, amount, d);
         d_y = dr::fmadd(d_y - d, amount, d);
+        diff_scale *= amount;
     }
 
     DRJIT_STRUCT(RayDifferential, o, d, maxt, time,
-                 wavelengths, o_x, o_y, d_x, d_y)
+                 wavelengths, o_x, o_y, d_x, d_y, diff_scale)
 };
 
 /// Return a string representation of the ray
