@@ -1015,8 +1015,14 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # Compute sampling weight
         weight = dr.select(active, value / bs.pdf, 0.0)
 
-        # Two-sided
-        bs.wo.z[attr.two_sided & ~masks.null] = dr.mulsign(bs.wo.z, si.wi.z)
+        # Two-sided. `si.wi.z` is NOT the sign to restore here: line ~907 already
+        # overwrote it with `dr.abs(si.wi.z)`, so `mulsign` against it can only ever
+        # multiply by +1 and this flip-back silently does nothing. `null_wi` is the
+        # pre-flip copy and carries the original sign. `_eval_pdf_impl` performs the same
+        # two steps in the OPPOSITE order (mulsign first, then abs), which is why eval/pdf
+        # were correct while sample was not -- and why `bsdf.pdf(bs.wo)` returns 0 on
+        # exactly the samples this line failed to flip.
+        bs.wo.z[attr.two_sided & ~masks.null] = dr.mulsign(bs.wo.z, null_wi.z)
 
         return bs, weight
 
