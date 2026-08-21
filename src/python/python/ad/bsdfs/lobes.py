@@ -178,6 +178,21 @@ def microfacet_shadow_masking(
 ) -> Tuple[mi.Float, mi.Float]:
     """
     Calculates the shadow masking term
+
+    HSR: `G` DOES NOT VANISH FOR AN OUTGOING DIRECTION BELOW THE HORIZON, in the
+    correlated branch. The `[0, 0, 1]` below is there to defeat Mitsuba's consistent-
+    orientation test, but that same test is what zeroes `smith_g1` when the direction is
+    under the surface: with `m = (0, 0, 1)` the guard reads `dot(w, m) * cos_theta(w) =
+    cos^2 > 0` and always passes, so `Go` is computed from `|tan theta_o|` and a
+    direction that is not there gets shadowed as if it were. At alpha = 1 that is a
+    factor of TWO.
+
+    This is not a render bug and the call is left alone: every caller in
+    `blender_principled` gates its lobe on `reflect_shading` / `refract_shading` before
+    the value is used, so the leak is masked out. It matters to anything that INTEGRATES
+    this lobe without those masks -- which is exactly what the table generator did, for
+    every shipped `.npy`. See `tables/precompute.py` and
+    `src/python_tests/test_ggx_table_provenance.py`.
     """
     if correlated_shadow_masking:
         # 2nd argument disable Mitsuba check for consistent orientation
@@ -371,8 +386,10 @@ def ggx_energy_compensation(
     The glass form has no separate F_avg: the dielectric Fresnel is already inside
     `ggx_glass_E`, whose value is the lobe's TOTAL albedo over reflection and refraction, so
     the scale is 1/E. It reads the SAME table on both sides of the interface, which is a
-    compromise forced by a measured defect in the shipped `ggx_glass_inv_E` -- the numbers
-    and the probe that established it are at the glass branch below.
+    compromise: the side-correct pair compounds into a light source in a closed glass
+    object. It was ALSO justified here by a "defect" in the shipped `ggx_glass_inv_E` that
+    turned out to be a defect in the probe instead -- that claim is withdrawn at the glass
+    branch below, along with the measurement that replaces it.
     """
     mu = dr.clip(dr.abs(cos_theta), 1e-4, 1.0)
     r = dr.clip(roughness, 1e-4, 1.0)
@@ -384,28 +401,38 @@ def ggx_energy_compensation(
         z = dr.sqrt(dr.abs((eta_up - 1.0) / (eta_up + 1.0)))
         E_out = fetch_table("ggx_glass_E").eval([r, mu, z])[0]
         E_in = fetch_table("ggx_glass_inv_E").eval([r, mu, z])[0]
-        # DELIBERATELY THE FRONT-SIDE TABLE ON BOTH SIDES, and the reason is a defect in the
-        # SHIPPED `ggx_glass_inv_E` table rather than in the choice of formula.
+        # DELIBERATELY THE FRONT-SIDE TABLE ON BOTH SIDES. It is a compromise, and the
+        # reason recorded here for it was WRONG -- see the withdrawal below.
         #
         # The side-correct choice is `ggx_glass_inv_E` for a ray leaving the medium. Applying
         # 1/E per interface with it compounds across the internal bounces and MANUFACTURES
         # energy: white glass at roughness 1.0 goes to 1.426853 where the analytic answer is
-        # 1.0 and Cycles reads 0.985881. That looked like the formula compounding, so the
-        # DENOMINATOR was measured instead of argued about -- integrate the lobe's own
-        # directional albedo straight off `BSDF.sample` (the returned weight IS value/pdf, so
-        # its mean is E(mu) by definition) and compare it to the table at the same (r, mu, z).
-        # At eta = 1.45, roughness 0.9, a ray LEAVING the medium:
+        # 1.0 and Cycles reads 0.985881. THAT observation stands; it is a render, and it is
+        # the only thing still holding this line to the front-side table.
         #
-        #     mu     measured E    ggx_glass_inv_E
-        #     0.9      0.769731           0.534163      (table 31% low)
-        #     0.5      0.639872           0.547019
-        #     0.2      0.560146           0.520391
+        # ~~`ggx_glass_inv_E` is simply too low -- 31% at eta 1.45, roughness 0.9, mu 0.9.~~
+        # WITHDRAWN. The measurement behind it integrated the lobe's own directional albedo
+        # off the plugin's `sample`, and that estimator counts an outgoing direction BELOW
+        # the horizon: `microfacet_shadow_masking` passes `[0, 0, 1]` to `smith_g1`, which
+        # defeats the orientation test that makes `G` vanish there, and the plugin's own eval
+        # masks are what normally hide it. Scored instead against Mitsuba's C++
+        # `roughdielectric` sampled in `TransportMode::Importance` -- an independent
+        # implementation whose mean sample weight IS the energy albedo -- the table is not
+        # low at all, and at two of the three quoted points it is HIGH:
         #
-        # The FRONT table passes the same check (0.932259 measured vs 0.908106 tabulated at
-        # mu = 0.9), and so does `ggx_E` for the conductor branch, so this is not the probe.
-        # `ggx_glass_inv_E` is simply too low, which is exactly how 1/E manufactures energy.
-        # Regenerating it means re-deriving mitsuba3's own `precompute.py` -- out of scope
-        # here, and it would change a shipped .npy.
+        #     mu    ggx_glass_inv_E   roughdielectric(Importance)   table is
+        #     0.9        0.534163            0.551704               -3.18%
+        #     0.5        0.547019            0.511489               +6.95%
+        #     0.2        0.520391            0.415031              +25.39%
+        #
+        # So the front-side substitution is NOT justified by a defective inverse table. What
+        # both glass tables do carry is a grazing/high-roughness bias of the same sign in
+        # BOTH of them (up to +55.8% on `ggx_glass_inv_E` and +40.4% on `ggx_glass_E` at
+        # mu = 0.2, roughness 0.87), which is the 1e3-sample count they were generated at.
+        # `src/python_tests/test_ggx_glass_tables_oracle.py` pins all of it.
+        #
+        # The experiment this now calls for -- side-correct tables, scored against a Cycles
+        # arm rather than against a furnace -- has not been run, so nothing is changed here.
         #
         # So of the three reachable options, at white glass roughness 1.0: side-correct
         # tables 1.426853 (manufactures energy), entering interface only 0.626018 (under),
