@@ -145,6 +145,29 @@ public:
 		// Normals are stored in a separate buffer in Blender 3.1+
         const float (*normals)[3] = reinterpret_cast<const float (*)[3]>(props.get<int64_t>("normals", 0));
 
+        // HSR: CORNER (split) normals -- one per LOOP, not one per vertex.
+        //
+        // `normals` above is Blender's per-VERTEX normal array, and it is the only normal
+        // this plugin ever read. Blender and Cycles do not shade from it. They shade from
+        // CORNER normals, which differ from the vertex average wherever an edge is marked
+        // sharp, a custom split-normal layer exists, or a Smooth-by-Angle modifier has split
+        // a crease -- and none of that is expressible one-normal-per-vertex.
+        //
+        // The consequence was a silently WRONG shading normal, not a missing feature. On the
+        // Blender 4.1 splash scene 40 of 148 meshes and 149042 of 15105612 corners (0.99%)
+        // are shaded from a normal that is not the one Blender uses, `sharp_face` explaining
+        // none of them. It is most visible on `Lamp 13` (884 sharp edges, 3380 split corners,
+        // corner-vs-vertex angle up to 50.9 deg): smoothing the cone/bowl seam on a metal
+        // sweeps the normal through the mirror direction and paints a bright specular ring
+        // that Cycles does not draw.
+        //
+        // Nothing else here needs to change to carry them: the vertex dedup `Key` below
+        // ALREADY discriminates on the normal for smooth faces, and `vertex_map` chains, so
+        // feeding it a per-loop normal makes it split the vertices by itself (Lamp 13: 4924
+        // verts -> 5816). Flat faces are deliberately left alone -- Cycles shades those from
+        // the triangle's geometric normal, which is what the flat branch already does.
+        const float (*loop_normals)[3] = reinterpret_cast<const float (*)[3]>(props.get<int64_t>("loop_normals", 0));
+
         bool has_cols = false;
         std::vector<std::pair<std::string, const blender::MLoopCol *>> cols;
         for (auto &key : props){
@@ -368,10 +391,17 @@ public:
                     }
                     if (vi >= vertex_count)
                         fail("reference to invalid vertex %i!", vi);
-                    InputNormal3f n = (version <= Version(3, 0, 0))
-                        ? InputNormal3f(verts_old_2[vi].no[0], verts_old_2[vi].no[1],
-                                        verts_old_2[vi].no[2])
-                        : InputNormal3f(normals[vi][0], normals[vi][1], normals[vi][2]);
+                    InputNormal3f n;
+                    if (version <= Version(3, 0, 0))
+                        n = InputNormal3f(verts_old_2[vi].no[0], verts_old_2[vi].no[1],
+                                          verts_old_2[vi].no[2]);
+                    else if (loop_normals != nullptr)
+                        // HSR: read what the shading branch below will read, or this
+                        // pre-check tests a normal that is never used.
+                        n = InputNormal3f(loop_normals[li][0], loop_normals[li][1],
+                                          loop_normals[li][2]);
+                    else
+                        n = InputNormal3f(normals[vi][0], normals[vi][1], normals[vi][2]);
                     any_zero = dr::all(n == 0.f);
                 }
                 if (any_zero)
@@ -400,6 +430,11 @@ public:
                         // Blender 2.xx - 3.0
                         const short *no = verts_old_2[vert_index].no;
                         // Store per vertex normals if the face is smooth or if the mesh is globally flat
+                        normal = m_to_world.scalar() * InputNormal3f(no[0], no[1], no[2]);
+                    } else if (loop_normals != nullptr) {
+                        // HSR: the corner normal -- indexed by LOOP, which is what Blender
+                        // shades with. See the note at the property read above.
+                        const float *no = loop_normals[loop_index];
                         normal = m_to_world.scalar() * InputNormal3f(no[0], no[1], no[2]);
                     } else {
                         const float *no = normals[vert_index];
