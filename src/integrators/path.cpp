@@ -41,7 +41,12 @@ Path tracer (:monosp:`path`)
      path immediately: the next surface is still reached and its emission still collected,
      but it gets no direct lighting and no further bounce -- the same truncation
      :monosp:`max_depth` already performs. Cycles compares each count *after* incrementing
-     it, so a budget of 0 and a budget of 1 both permit exactly one bounce of that kind.
+     it, against a kernel value that is Blender's setting **plus one**
+     (:monosp:`scene/integrator.cpp`, ``max_diffuse_bounce = max_diffuse_bounce + 1``), so
+     Blender's :monosp:`diffuse_bounces` = N permits exactly N diffuse bounces and N = 0
+     permits none. Pass N + 1 here to reproduce that kernel value verbatim.
+     :monosp:`transparent_max_depth` is the exception in both engines: Cycles stores it
+     WITHOUT the plus-one, so pass Blender's :monosp:`transparent_max_bounces` unchanged.
      (Default: -1 each, i.e. unlimited)
 
  * - rr_depth
@@ -672,8 +677,15 @@ public:
                running out does not stop the path where it ran out -- the next surface is
                still reached and its emission still collected.
 
-               `>=` and not `>`: Cycles compares the count AFTER incrementing it, which is why
-               a budget of 0 and a budget of 1 both allow exactly one bounce of that kind.
+               `>=` and not `>`: Cycles compares the count AFTER incrementing it
+               (`kernel/integrator/path_state.h`), so a budget of D buys D bounces of that
+               kind and a budget of 0 buys none. Note this is the KERNEL's number, which for
+               every lobe budget is Blender's setting plus one (`scene/integrator.cpp`:
+               "Plus one so that a bounce of 0 indicates no global illumination, only direct
+               illumination"); the exporter adds that one. The only budget Cycles stores
+               verbatim is `transparent_max_bounce` -- and it is the only one where 0 and 1
+               do behave alike, which Cycles' own FIXME in `path_state.h` calls out. Do not
+               generalise that quirk to the lobe budgets; they do not share it.
 
                Known divergence, stated rather than hidden: Cycles distinguishes
                `TERMINATE_ON_NEXT_SURFACE` (the transparent budget) from
