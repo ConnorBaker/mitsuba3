@@ -541,17 +541,82 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 transmission=False,
             )
             albedos.specular[attr.spec_ior_level == 0.0] = 0.0
-            # HSR: THE LAYERING BUDGET HAS TO MATCH WHAT THE LOBE DELIVERS.
+            # HSR: THE SPECULAR LOBE'S SINGLE-SCATTERING LOSS, SPENT THE WAY CYCLES SPENDS IT.
+            #
             # `microfacet_estimate_albedo` returns the roughness-aware FRESNEL reflectance,
-            # and `layering` hands the diffuse lobe below only `1 - that`. But the specular
-            # lobe is single-scattering: it delivers reflectance * E(roughness, mu), and the
-            # remaining reflectance * (1 - E) is subtracted from the substrate and then
-            # reflected by nobody. White base, roughness 0.8, constant environment of
-            # radiance 1: 0.983106 where Cycles reads 0.999658 and the analytic answer is 1.
-            albedos.specular *= ggx_directional_albedo(
-                attr.roughness, mi.Frame3f.cos_theta(sh_wi)
-            )
-            attenuation = layering(albedos.specular, weights.specular, attenuation)
+            # while a single-scattering lobe only DELIVERS reflectance * E(roughness, mu).
+            # The `reflectance * (1 - E)` difference has to go somewhere, and the choice is
+            # not free -- it is the whole content of Blender's GGX / MULTI_GGX enum:
+            #
+            #   GGX       Cycles LOSES it. `bsdf_microfacet_estimate_albedo` carries no
+            #             `energy_scale` term (checked in `kernel/closure/bsdf_microfacet.h`),
+            #             so the substrate is attenuated by the full Fresnel reflectance and
+            #             the lobe under-delivers. The scene is darker, and that is Cycles'
+            #             documented single-scattering deficit rather than a bug to repair.
+            #   MULTI_GGX Cycles RECOVERS it INTO THE SPECULAR LOBE, via
+            #             `microfacet_ggx_preserve_energy`, and leaves the substrate budget
+            #             alone.
+            #
+            # This branch used to do NEITHER: it multiplied the LAYERING budget by E, which
+            # hands the missing energy DOWN to the diffuse substrate, unconditionally and in
+            # both modes. That conserves energy, so a white-base furnace read correctly and
+            # the defect hid there -- but it is wrong three ways at once. It pays the energy
+            # out DIFFUSE instead of specular (wrong direction, wrong lobe), tinted by
+            # `base_color` instead of by the Fresnel term (wrong colour), and it fires under
+            # GGX where Cycles genuinely loses the energy (wrong mode). A black substrate
+            # loses the recovery entirely, which is where the furnace cannot see it.
+            #
+            # MEASURED, on the Blender 4.1 splash scene at 128 spp / max_bounces 32, every
+            # material overridden to one Principled BSDF (base 0.5) -- the arm that exposed
+            # this. Mitsuba's response to the enum was ZERO at every roughness while Cycles'
+            # rose monotonically, because both of Mitsuba's arms were doing the substrate
+            # handoff:
+            #
+            #     roughness   mi GGX->MULTI_GGX   cy GGX->MULTI_GGX
+            #        0.2           +0.026%             +0.368%
+            #        0.5           +0.005%             +2.219%
+            #        0.8           -0.014%             +4.714%
+            #        1.0           +0.022%             +6.193%
+            #
+            # The metallic lobe already had this right (it compensates the WEIGHT, above),
+            # which is why the same ladder's metal arm tracked Cycles to within 0.7 points
+            # (+13.62% vs +14.36%) -- the dielectric lobe was the one still unfixed.
+            if self.multiscatter:
+                # Cycles' net scale on the lobe is `S = 1 + Fms * (1-E)/E` with
+                # `Fms = Fss * E_avg / (1 - Fss * (1 - E_avg))`. `ggx_energy_compensation` is
+                # the identical Kulla-Conty expression with `F_avg` in place of `Fss`, so
+                # passing Cycles' own `Fss` as `r0` reproduces it rather than approximating.
+                _S = ggx_energy_compensation(
+                    attr.roughness,
+                    mi.Frame3f.cos_theta(sh_wi),
+                    r0=generalized_schlick_Fss(spec_r0, spec_eta),
+                )
+                # THE SPLIT MATTERS, AND GETTING IT WRONG COSTS THE WHOLE EFFECT.
+                #
+                # Cycles spends `S` in two places that are NOT interchangeable. It scales the
+                # EVALUATION by `energy_scale = 1/E`, and it scales the stored WEIGHT by
+                # `darkening = S*E` -- and only the second reaches the layering budget, because
+                # the budget is `bsdf_albedo` = weight x estimate and `energy_scale` is applied
+                # later, at eval. So the substrate is attenuated by `albedo * S * E` while the
+                # lobe delivers `albedo * S`.
+                #
+                # Boosting the weight BEFORE `layering` instead makes the diffuse substrate
+                # give up exactly what the specular lobe gains, and the render does not move.
+                # Measured that way: scene gain +0.091% where Cycles reads +2.219% (roughness
+                # 0.5, 128 spp, 32 bounces). The white furnace hid it -- it scored +0.008% --
+                # while the BLACK-base control showed the full +2.48% at roughness 0.8, because
+                # with `base_color` 0 there is no substrate for the boost to be stolen back by.
+                # A control that only works on one of the two arms is the tell.
+                albedos.specular *= _S * ggx_directional_albedo(
+                    attr.roughness, mi.Frame3f.cos_theta(sh_wi)
+                )
+                attenuation = layering(albedos.specular, weights.specular, attenuation)
+                weights.specular *= _S
+            else:
+                # Plain GGX: Cycles sets neither term, so the substrate is attenuated by the
+                # full Fresnel reflectance while the lobe delivers only `reflectance * E`.
+                # The difference is LOST, and that loss is what the enum exists to switch off.
+                attenuation = layering(albedos.specular, weights.specular, attenuation)
 
         # Diffuse lobe
         weights.diffuse *= attenuation

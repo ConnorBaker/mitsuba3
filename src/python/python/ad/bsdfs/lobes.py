@@ -286,6 +286,44 @@ def sheen_directional_albedo(cos_theta: mi.Float) -> mi.Float:
     )
 
 
+def fresnel_dielectric_Fss(eta: mi.Float) -> mi.Float:
+    """
+    Average single-scattering Fresnel reflectance of a smooth dielectric interface.
+
+    Cycles' `fresnel_dielectric_Fss` (`kernel/closure/bsdf_util.h`) verbatim -- a fit, not a
+    table, so it transcribes exactly rather than approximately. It is the input Cycles feeds
+    to its multiple-scattering compensation for a generalized-Schlick DIELECTRIC lobe, where
+    the conductor path instead uses the base colour directly.
+    """
+    return dr.select(
+        eta < 1.0,
+        0.997118 + eta * (0.1014 - eta * (0.965241 + eta * 0.130607)),
+        (eta - 1.0) / (4.08567 + 1.00071 * eta),
+    )
+
+
+def generalized_schlick_Fss(r0: mi.Spectrum, eta: mi.Float) -> mi.Spectrum:
+    """
+    Cycles' `Fss` for a generalized-Schlick lobe with a DIELECTRIC Fresnel exponent.
+
+    From `bsdf_microfacet_setup_fresnel_generalized_schlick`: with `exponent < 0` (which is
+    how the Principled BSDF spells "use the real dielectric curve"),
+
+        s   = saturate((Fss_dielectric(eta) - F0(eta)) / (1 - F0(eta)))
+        Fss = reflection_tint * mix(f0, f90, s)
+
+    and for the Principled specular lobe `reflection_tint = 1`, `f90 = 1`. `s` places the
+    lobe's average reflectance on the F0..1 line, so a tinted f0 keeps its tint in the
+    multiple-scattering series -- which is the whole reason this is not just F0.
+    """
+    f0_untinted = eta_to_r0(eta)
+    s = dr.clip(
+        (fresnel_dielectric_Fss(eta) - f0_untinted) / dr.maximum(1.0 - f0_untinted, 1e-6),
+        0.0, 1.0,
+    )
+    return dr.lerp(mi.Spectrum(r0), mi.Spectrum(1.0), s)
+
+
 def ggx_directional_albedo(roughness: mi.Float, cos_theta: mi.Float) -> mi.Float:
     """
     Directional albedo E(roughness, mu) of a GGX lobe with the Fresnel term set to 1 --
