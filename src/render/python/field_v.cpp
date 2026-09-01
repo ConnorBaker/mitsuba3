@@ -21,9 +21,17 @@ public:
     using BaseField = mitsuba::Field<Float, Spectrum>;
     using Args = FieldArgs<Float>;
 
-    NB_TRAMPOLINE(Field, 51);
+    NB_TRAMPOLINE(Field);
 
-    PyField(const Properties &props) : Field(props) { }
+    PyField(const Properties &props) : Field(props) {
+        nb::handle self = nb_trampoline.base();
+        if (self.is_valid())
+            m_class_name = nb::type_name(self.type()).c_str();
+        else
+            m_class_name = Field::ClassName;
+    }
+
+    std::string_view class_name() const override { return m_class_name; }
 
     FieldValueType out_type() const override {
         NB_OVERRIDE(out_type);
@@ -77,7 +85,8 @@ public:
 
     Float eval_1(const SurfaceInteraction3f &si,
                  Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_1", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_1",
+                                  nb::detail::str_hash("eval_1"), false);
         if (ticket.key.is_valid())
             return nb::cast<Float>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -87,7 +96,8 @@ public:
 
     Float eval_1(const Interaction3f &it,
                  Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_1", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_1",
+                                  nb::detail::str_hash("eval_1"), false);
         if (ticket.key.is_valid())
             return nb::cast<Float>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -97,7 +107,8 @@ public:
 
     Color3f eval_3(const SurfaceInteraction3f &si,
                    Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_3", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_3",
+                                  nb::detail::str_hash("eval_3"), false);
         if (ticket.key.is_valid())
             return nb::cast<Color3f>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -107,7 +118,8 @@ public:
 
     Vector3f eval_3(const Interaction3f &it,
                     Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_3", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_3",
+                                  nb::detail::str_hash("eval_3"), false);
         if (ticket.key.is_valid())
             return nb::cast<Vector3f>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -118,7 +130,8 @@ public:
     typename BaseField::Array6f eval_6(const Interaction3f &it,
                                        Mask active) const override {
         using Ret = typename BaseField::Array6f;
-        nb::detail::ticket ticket(nb_trampoline, "eval_6", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_6",
+                                  nb::detail::str_hash("eval_6"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -130,7 +143,8 @@ public:
     eval_1_grad(const SurfaceInteraction3f &si,
                 Mask active) const override {
         using Ret = typename BaseField::Vector2f;
-        nb::detail::ticket ticket(nb_trampoline, "eval_1_grad", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_1_grad",
+                                  nb::detail::str_hash("eval_1_grad"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 nb_trampoline.base().attr(ticket.key)(si, active));
@@ -141,7 +155,8 @@ public:
     sample_spectrum(const SurfaceInteraction3f &si, const Wavelength &sample,
                     Mask active) const override {
         using Ret = std::pair<Wavelength, UnpolarizedSpectrum>;
-        nb::detail::ticket ticket(nb_trampoline, "sample_spectrum", false);
+        nb::detail::ticket ticket(nb_trampoline, "sample_spectrum",
+                                  nb::detail::str_hash("sample_spectrum"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 nb_trampoline.base().attr(ticket.key)(si, sample, active));
@@ -150,7 +165,8 @@ public:
 
     Wavelength pdf_spectrum(const SurfaceInteraction3f &si,
                             Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "pdf_spectrum", false);
+        nb::detail::ticket ticket(nb_trampoline, "pdf_spectrum",
+                                  nb::detail::str_hash("pdf_spectrum"), false);
         if (ticket.key.is_valid())
             return nb::cast<Wavelength>(
                 nb_trampoline.base().attr(ticket.key)(si, active));
@@ -161,7 +177,8 @@ public:
     sample_position(const Point2f &sample,
                     Mask active) const override {
         using Ret = std::pair<Point2f, Float>;
-        nb::detail::ticket ticket(nb_trampoline, "sample_position", false);
+        nb::detail::ticket ticket(nb_trampoline, "sample_position",
+                                  nb::detail::str_hash("sample_position"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 nb_trampoline.base().attr(ticket.key)(sample, active));
@@ -169,7 +186,8 @@ public:
     }
 
     Float pdf_position(const Point2f &p, Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "pdf_position", false);
+        nb::detail::ticket ticket(nb_trampoline, "pdf_position",
+                                  nb::detail::str_hash("pdf_position"), false);
         if (ticket.key.is_valid())
             return nb::cast<Float>(
                 nb_trampoline.base().attr(ticket.key)(p, active));
@@ -177,14 +195,16 @@ public:
     }
 
     Float mean() const override {
-        nb::detail::ticket ticket(nb_trampoline, "mean", false);
+        nb::detail::ticket ticket(nb_trampoline, "mean",
+                                  nb::detail::str_hash("mean"), false);
         if (ticket.key.is_valid())
             return nb::cast<Float>(nb_trampoline.base().attr(ticket.key)());
         return BaseField::mean();
     }
 
     ScalarFloat max() const override {
-        nb::detail::ticket ticket(nb_trampoline, "max", false);
+        nb::detail::ticket ticket(nb_trampoline, "max",
+                                  nb::detail::str_hash("max"), false);
         if (ticket.key.is_valid())
             return nb::cast<ScalarFloat>(
                 nb_trampoline.base().attr(ticket.key)());
@@ -192,11 +212,13 @@ public:
     }
 
     ScalarVector2i resolution_2d() const override {
-        nb::detail::ticket ticket(nb_trampoline, "resolution", false);
+        nb::detail::ticket ticket(nb_trampoline, "resolution",
+                                  nb::detail::str_hash("resolution"), false);
         if (ticket.key.is_valid())
             return nb::cast<ScalarVector2i>(
                 nb_trampoline.base().attr(ticket.key)());
-        ticket = nb::detail::ticket(nb_trampoline, "resolution_2d", false);
+        ticket = nb::detail::ticket(nb_trampoline, "resolution_2d",
+                                    nb::detail::str_hash("resolution_2d"), false);
         if (ticket.key.is_valid())
             return nb::cast<ScalarVector2i>(
                 nb_trampoline.base().attr(ticket.key)());
@@ -204,7 +226,8 @@ public:
     }
 
     ScalarFloat spectral_resolution() const override {
-        nb::detail::ticket ticket(nb_trampoline, "spectral_resolution", false);
+        nb::detail::ticket ticket(nb_trampoline, "spectral_resolution",
+                                  nb::detail::str_hash("spectral_resolution"), false);
         if (ticket.key.is_valid())
             return nb::cast<ScalarFloat>(
                 nb_trampoline.base().attr(ticket.key)());
@@ -212,7 +235,8 @@ public:
     }
 
     ScalarVector2f wavelength_range() const override {
-        nb::detail::ticket ticket(nb_trampoline, "wavelength_range", false);
+        nb::detail::ticket ticket(nb_trampoline, "wavelength_range",
+                                  nb::detail::str_hash("wavelength_range"), false);
         if (ticket.key.is_valid())
             return nb::cast<ScalarVector2f>(
                 nb_trampoline.base().attr(ticket.key)());
@@ -220,7 +244,8 @@ public:
     }
 
     bool is_spatially_varying() const override {
-        nb::detail::ticket ticket(nb_trampoline, "is_spatially_varying", false);
+        nb::detail::ticket ticket(nb_trampoline, "is_spatially_varying",
+                                  nb::detail::str_hash("is_spatially_varying"), false);
         if (ticket.key.is_valid())
             return nb::cast<bool>(nb_trampoline.base().attr(ticket.key)());
         return BaseField::is_spatially_varying();
@@ -230,7 +255,8 @@ public:
     eval_gradient(const Interaction3f &it,
                   Mask active) const override {
         using Ret = std::pair<UnpolarizedSpectrum, Vector3f>;
-        nb::detail::ticket ticket(nb_trampoline, "eval_gradient", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_gradient",
+                                  nb::detail::str_hash("eval_gradient"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 nb_trampoline.base().attr(ticket.key)(it, active));
@@ -238,7 +264,8 @@ public:
     }
 
     void max_per_channel(ScalarFloat *out) const override {
-        nb::detail::ticket ticket(nb_trampoline, "max_per_channel", false);
+        nb::detail::ticket ticket(nb_trampoline, "max_per_channel",
+                                  nb::detail::str_hash("max_per_channel"), false);
         if (ticket.key.is_valid()) {
             nb::object result =
                 nb_trampoline.base().attr(ticket.key)();
@@ -256,7 +283,8 @@ public:
     }
 
     ScalarBoundingBox3f bbox() const override {
-        nb::detail::ticket ticket(nb_trampoline, "bbox", false);
+        nb::detail::ticket ticket(nb_trampoline, "bbox",
+                                  nb::detail::str_hash("bbox"), false);
         if (ticket.key.is_valid())
             return nb::cast<ScalarBoundingBox3f>(
                 nb_trampoline.base().attr(ticket.key)());
@@ -264,11 +292,13 @@ public:
     }
 
     ScalarVector3i resolution_3d() const override {
-        nb::detail::ticket ticket(nb_trampoline, "resolution", false);
+        nb::detail::ticket ticket(nb_trampoline, "resolution",
+                                  nb::detail::str_hash("resolution"), false);
         if (ticket.key.is_valid())
             return nb::cast<ScalarVector3i>(
                 nb_trampoline.base().attr(ticket.key)());
-        ticket = nb::detail::ticket(nb_trampoline, "resolution_3d", false);
+        ticket = nb::detail::ticket(nb_trampoline, "resolution_3d",
+                                    nb::detail::str_hash("resolution_3d"), false);
         if (ticket.key.is_valid())
             return nb::cast<ScalarVector3i>(
                 nb_trampoline.base().attr(ticket.key)());
@@ -276,7 +306,8 @@ public:
     }
 
     uint32_t channel_count() const override {
-        nb::detail::ticket ticket(nb_trampoline, "channel_count", false);
+        nb::detail::ticket ticket(nb_trampoline, "channel_count",
+                                  nb::detail::str_hash("channel_count"), false);
         if (ticket.key.is_valid())
             return nb::cast<uint32_t>(
                 nb_trampoline.base().attr(ticket.key)());
@@ -284,13 +315,14 @@ public:
     }
 
     std::string to_string() const override {
-        NB_OVERRIDE(to_string);
+        NB_OVERRIDE_NAME("__repr__", to_string);
     }
 
     typename BaseField::FloatStorage
     eval(const SurfaceInteraction3f &si, Args args, Mask active) const override {
         using Ret = typename BaseField::FloatStorage;
-        nb::detail::ticket ticket(nb_trampoline, "eval", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval",
+                                  nb::detail::str_hash("eval"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -301,7 +333,8 @@ public:
     typename BaseField::FloatStorage
     eval(const Interaction3f &it, Args args, Mask active) const override {
         using Ret = typename BaseField::FloatStorage;
-        nb::detail::ticket ticket(nb_trampoline, "eval", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval",
+                                  nb::detail::str_hash("eval"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -311,7 +344,8 @@ public:
 
     Float eval_1(const SurfaceInteraction3f &si, Args args,
                  Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_1", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_1",
+                                  nb::detail::str_hash("eval_1"), false);
         if (ticket.key.is_valid())
             return nb::cast<Float>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -321,7 +355,8 @@ public:
 
     Float eval_1(const Interaction3f &it, Args args,
                  Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_1", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_1",
+                                  nb::detail::str_hash("eval_1"), false);
         if (ticket.key.is_valid())
             return nb::cast<Float>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -331,7 +366,8 @@ public:
 
     Color3f eval_color3(const SurfaceInteraction3f &si, Args args,
                         Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_color3", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_color3",
+                                  nb::detail::str_hash("eval_color3"), false);
         if (ticket.key.is_valid())
             return nb::cast<Color3f>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -341,7 +377,8 @@ public:
 
     Color3f eval_color3(const Interaction3f &it, Args args,
                         Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_color3", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_color3",
+                                  nb::detail::str_hash("eval_color3"), false);
         if (ticket.key.is_valid())
             return nb::cast<Color3f>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -353,7 +390,8 @@ public:
     eval_array2(const SurfaceInteraction3f &si, Args args,
                 Mask active) const override {
         using Ret = typename BaseField::Array2f;
-        nb::detail::ticket ticket(nb_trampoline, "eval_array2", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_array2",
+                                  nb::detail::str_hash("eval_array2"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -364,7 +402,8 @@ public:
     typename BaseField::Array2f
     eval_array2(const Interaction3f &it, Args args, Mask active) const override {
         using Ret = typename BaseField::Array2f;
-        nb::detail::ticket ticket(nb_trampoline, "eval_array2", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_array2",
+                                  nb::detail::str_hash("eval_array2"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -376,7 +415,8 @@ public:
     eval_array3(const SurfaceInteraction3f &si, Args args,
                 Mask active) const override {
         using Ret = typename BaseField::Array3f;
-        nb::detail::ticket ticket(nb_trampoline, "eval_array3", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_array3",
+                                  nb::detail::str_hash("eval_array3"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -387,7 +427,8 @@ public:
     typename BaseField::Array3f
     eval_array3(const Interaction3f &it, Args args, Mask active) const override {
         using Ret = typename BaseField::Array3f;
-        nb::detail::ticket ticket(nb_trampoline, "eval_array3", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_array3",
+                                  nb::detail::str_hash("eval_array3"), false);
         if (ticket.key.is_valid())
             return nb::cast<Ret>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -397,7 +438,8 @@ public:
 
     UnpolarizedSpectrum eval_spec(const SurfaceInteraction3f &si, Args args,
                                   Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_spec", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_spec",
+                                  nb::detail::str_hash("eval_spec"), false);
         if (ticket.key.is_valid())
             return nb::cast<UnpolarizedSpectrum>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -407,7 +449,8 @@ public:
 
     UnpolarizedSpectrum eval_spec(const Interaction3f &it, Args args,
                                   Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_spec", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_spec",
+                                  nb::detail::str_hash("eval_spec"), false);
         if (ticket.key.is_valid())
             return nb::cast<UnpolarizedSpectrum>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -419,7 +462,8 @@ public:
     eval_array6(const SurfaceInteraction3f &si, Args args,
                 Mask active) const override {
         using Ret = typename BaseField::Array6f;
-        nb::detail::ticket ticket(nb_trampoline, "eval_array6", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_array6",
+                                  nb::detail::str_hash("eval_array6"), false);
         if (ticket.key.is_valid())
             return field_array6_from_python<Float, Ret>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -430,7 +474,8 @@ public:
     typename BaseField::Array6f
     eval_array6(const Interaction3f &it, Args args, Mask active) const override {
         using Ret = typename BaseField::Array6f;
-        nb::detail::ticket ticket(nb_trampoline, "eval_array6", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_array6",
+                                  nb::detail::str_hash("eval_array6"), false);
         if (ticket.key.is_valid())
             return field_array6_from_python<Float, Ret>(
                 call_field_override(nb_trampoline.base().attr(ticket.key),
@@ -440,7 +485,8 @@ public:
 
     void eval_n(const SurfaceInteraction3f &si, Float *out, uint32_t count,
                 Args args, Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_n", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_n",
+                                  nb::detail::str_hash("eval_n"), false);
         if (ticket.key.is_valid()) {
             nb::object result = call_eval_n_override(
                 nb_trampoline.base().attr(ticket.key), si, count, args, active);
@@ -452,7 +498,8 @@ public:
 
     void eval_n(const Interaction3f &it, Float *out, uint32_t count,
                 Args args, Mask active) const override {
-        nb::detail::ticket ticket(nb_trampoline, "eval_n", false);
+        nb::detail::ticket ticket(nb_trampoline, "eval_n",
+                                  nb::detail::str_hash("eval_n"), false);
         if (ticket.key.is_valid()) {
             nb::object result = call_eval_n_override(
                 nb_trampoline.base().attr(ticket.key), it, count, args, active);
@@ -462,9 +509,10 @@ public:
         BaseField::eval_n(it, out, count, args, active);
     }
 
-    DR_TRAMPOLINE_TRAVERSE_CB(Field)
-
 private:
+    /// Name of the Python class implementing this plugin
+    std::string m_class_name;
+
     static bool python_callable_accepts_parameter(nb::handle callable,
                                                   std::string_view name) {
         nb::object function = nb::borrow(callable);
@@ -1225,6 +1273,7 @@ MI_PY_EXPORT(Field) {
         dr::ArrayBinding b;
         auto field_ptr = dr::bind_array_t<FieldPtr>(b, m, "FieldPtr");
         bind_field_generic<FieldPtr>(field_ptr);
+        field_ptr.freeze();
     }
 
     drjit::bind_traverse(field);
