@@ -21,9 +21,17 @@ public:
     using BaseField = mitsuba::Field<Float, Spectrum>;
     using Args = FieldArgs<Float>;
 
-    NB_TRAMPOLINE(Field, 51);
+    NB_TRAMPOLINE(Field);
 
-    PyField(const Properties &props) : Field(props) { }
+    PyField(const Properties &props) : Field(props) {
+        nb::handle self = nb_trampoline.base();
+        if (self.is_valid())
+            m_class_name = nb::type_name(self.type()).c_str();
+        else
+            m_class_name = Field::ClassName;
+    }
+
+    std::string_view class_name() const override { return m_class_name; }
 
     FieldValueType out_type() const override {
         NB_OVERRIDE(out_type);
@@ -284,7 +292,7 @@ public:
     }
 
     std::string to_string() const override {
-        NB_OVERRIDE(to_string);
+        NB_OVERRIDE_NAME("__repr__", to_string);
     }
 
     typename BaseField::FloatStorage
@@ -462,9 +470,10 @@ public:
         BaseField::eval_n(it, out, count, args, active);
     }
 
-    DR_TRAMPOLINE_TRAVERSE_CB(Field)
-
 private:
+    /// Name of the Python class implementing this plugin
+    std::string m_class_name;
+
     static bool python_callable_accepts_parameter(nb::handle callable,
                                                   std::string_view name) {
         nb::object function = nb::borrow(callable);
@@ -1225,6 +1234,7 @@ MI_PY_EXPORT(Field) {
         dr::ArrayBinding b;
         auto field_ptr = dr::bind_array_t<FieldPtr>(b, m, "FieldPtr");
         bind_field_generic<FieldPtr>(field_ptr);
+        field_ptr.freeze();
     }
 
     drjit::bind_traverse(field);
