@@ -315,7 +315,9 @@ MI_VARIANT Float SurfaceField<Float, Spectrum>::eval_1(const SurfaceInteraction3
 
 MI_VARIANT typename SurfaceField<Float, Spectrum>::Vector2f
 SurfaceField<Float, Spectrum>::eval_1_grad(const SurfaceInteraction3f &, Mask) const {
-    NotImplementedError("eval_1_grad");
+    Throw("%s::eval_1_grad(): not implemented! Only fields that represent "
+          "a single-channel image or height field provide this operation.",
+          class_name());
 }
 
 MI_VARIANT typename SurfaceField<Float, Spectrum>::Color3f

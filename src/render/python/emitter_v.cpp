@@ -11,7 +11,7 @@
 MI_VARIANT class PyEmitter : public Emitter<Float, Spectrum> {
 public:
     MI_IMPORT_TYPES(Emitter, Scene, Medium, Shape)
-    NB_TRAMPOLINE(Emitter, 16);
+    NB_TRAMPOLINE(Emitter);
 
     PyEmitter(const Properties &props) : Emitter(props) { }
 
@@ -85,8 +85,6 @@ public:
     using Emitter::m_flags;
     using Emitter::m_needs_sample_2;
     using Emitter::m_needs_sample_3;
-
-    DR_TRAMPOLINE_TRAVERSE_CB(Emitter);
 };
 
 template <typename Ptr, typename Cls> void bind_emitter_generic(Cls &cls) {
@@ -162,6 +160,8 @@ MI_PY_EXPORT(Emitter) {
         .def(nb::init<const Properties&>(), "props"_a)
         .def_method(Emitter, is_environment)
         .def_method(Emitter, sampling_weight)
+        .def_method(Emitter, visible)
+        .def_method(Emitter, visibility_mask)
         .def_method(Emitter, flags, "active"_a = true)
         .def_field(PyEmitter, m_needs_sample_2, D(Endpoint, m_needs_sample_2))
         .def_field(PyEmitter, m_needs_sample_3, D(Endpoint, m_needs_sample_3))
@@ -173,6 +173,7 @@ MI_PY_EXPORT(Emitter) {
         dr::ArrayBinding b;
         auto emitter_ptr = dr::bind_array_t<EmitterPtr>(b, m, "EmitterPtr");
         bind_emitter_generic<EmitterPtr>(emitter_ptr);
+        emitter_ptr.freeze();
     }
 
 }

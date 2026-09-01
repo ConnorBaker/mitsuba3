@@ -59,7 +59,7 @@ ScopedSignalHandler::~ScopedSignalHandler() {
 MI_VARIANT class PySamplingIntegrator : public SamplingIntegrator<Float, Spectrum> {
 public:
     MI_IMPORT_TYPES(SamplingIntegrator, Scene, Sensor, Sampler, Medium)
-    NB_TRAMPOLINE(SamplingIntegrator, 6);
+    NB_TRAMPOLINE(SamplingIntegrator);
 
     PySamplingIntegrator(const Properties &props) : SamplingIntegrator(props) {
         if constexpr (!dr::is_jit_v<Float>) {
@@ -103,7 +103,8 @@ public:
                                      Mask active) const override {
         using PyReturn = std::tuple<Spectrum, Mask, std::vector<Float>>;
 
-        nanobind::detail::ticket nb_ticket(nb_trampoline, "sample", true);
+        constexpr uint64_t nb_hash = nanobind::detail::str_hash("sample");
+        nanobind::detail::ticket nb_ticket(nb_trampoline, "sample", nb_hash, true);
         auto [spec, mask, aovs_] =
             nanobind::cast<PyReturn>(nb_trampoline.base().attr(nb_ticket.key)(
                 scene, sampler, ray, medium, active));
@@ -127,15 +128,13 @@ public:
     void parameters_changed(const std::vector<std::string> &keys) override {
         NB_OVERRIDE(parameters_changed, keys);
     }
-
-    DR_TRAMPOLINE_TRAVERSE_CB(SamplingIntegrator)
 };
 
 /// Trampoline for derived types implemented in Python
 MI_VARIANT class PyAdjointIntegrator : public AdjointIntegrator<Float, Spectrum> {
 public:
     MI_IMPORT_TYPES(AdjointIntegrator, Scene, Sensor, Sampler, ImageBlock)
-    NB_TRAMPOLINE(AdjointIntegrator, 4);
+    NB_TRAMPOLINE(AdjointIntegrator);
 
     PyAdjointIntegrator(const Properties &props) : AdjointIntegrator(props) {
         if constexpr (!dr::is_jit_v<Float>) {
@@ -167,7 +166,13 @@ public:
         NB_OVERRIDE(to_string);
     }
 
-    DR_TRAMPOLINE_TRAVERSE_CB(AdjointIntegrator)
+    void traverse(TraversalCallback *cb) override {
+        NB_OVERRIDE(traverse, cb);
+    }
+
+    void parameters_changed(const std::vector<std::string> &keys) override {
+        NB_OVERRIDE(parameters_changed, keys);
+    }
 };
 
 /**
@@ -193,7 +198,7 @@ MI_VARIANT class PyADIntegrator : public CppADIntegrator<Float, Spectrum> {
 public:
     MI_IMPORT_TYPES(Scene, Sensor, Sampler, Medium, Emitter, EmitterPtr, BSDF, BSDFPtr)
     using Base = CppADIntegrator<Float, Spectrum>;
-    NB_TRAMPOLINE(Base, 6);
+    NB_TRAMPOLINE(Base);
 
     PyADIntegrator(const Properties &props) : Base(props) {
         if constexpr (!dr::is_jit_v<Float>) {
@@ -217,7 +222,8 @@ public:
                             Sensor *sensor,
                             UInt32 seed = 0,
                             uint32_t spp = 0) override {
-        nanobind::detail::ticket nb_ticket(nb_trampoline, "render_forward", false);
+        constexpr uint64_t nb_hash = nanobind::detail::str_hash("render_forward");
+        nanobind::detail::ticket nb_ticket(nb_trampoline, "render_forward", nb_hash, false);
         if (nb_ticket.key.is_valid())
             return nanobind::cast<TensorXf>(
                 nb_trampoline.base().attr(nb_ticket.key)(
@@ -232,7 +238,8 @@ public:
                          Sensor* sensor,
                          UInt32 seed = 0,
                          uint32_t spp = 0) override {
-        nanobind::detail::ticket nb_ticket(nb_trampoline, "render_backward", false);
+        constexpr uint64_t nb_hash = nanobind::detail::str_hash("render_backward");
+        nanobind::detail::ticket nb_ticket(nb_trampoline, "render_backward", nb_hash, false);
         if (nb_ticket.key.is_valid())
             nanobind::cast<void>(nb_trampoline.base().attr(nb_ticket.key)(
                 scene, *((nb::object *) params), grad_in, sensor, seed, spp));
@@ -246,7 +253,8 @@ public:
                                      const Medium * /* unused */,
                                      Float *aovs,
                                      Mask active) const override {
-        nanobind::detail::ticket nb_ticket(nb_trampoline, "sample", true);
+        constexpr uint64_t nb_hash = nanobind::detail::str_hash("sample");
+        nanobind::detail::ticket nb_ticket(nb_trampoline, "sample", nb_hash, true);
 
         nb::dict kwargs;
         kwargs["keyword"] = "value";
@@ -277,9 +285,15 @@ public:
         NB_OVERRIDE(to_string);
     }
 
-    using Base::m_hide_emitters;
+    void traverse(TraversalCallback *cb) override {
+        NB_OVERRIDE(traverse, cb);
+    }
 
-    DR_TRAMPOLINE_TRAVERSE_CB(Base)
+    void parameters_changed(const std::vector<std::string> &keys) override {
+        NB_OVERRIDE(parameters_changed, keys);
+    }
+
+    using Base::m_hide_emitters;
 };
 
 MI_PY_EXPORT(Integrator) {
@@ -316,9 +330,7 @@ MI_PY_EXPORT(Integrator) {
             "seed"_a = 0, "spp"_a = 0, "develop"_a = true, "evaluate"_a = true)
         .def_method(Integrator, cancel)
         .def_method(Integrator, should_stop)
-        .def_method(Integrator, aov_names)
-        .def_method(Integrator, skip_area_emitters, "scene"_a, "ray"_a,
-                    "coherent"_a = false, "active"_a = true);
+        .def_method(Integrator, aov_names);
 
     drjit::bind_traverse(cls);
 

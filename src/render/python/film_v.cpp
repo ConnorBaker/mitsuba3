@@ -17,7 +17,7 @@
 MI_VARIANT class PyFilm : public Film<Float, Spectrum> {
 public:
     MI_IMPORT_TYPES(Film, ImageBlock)
-    NB_TRAMPOLINE(Film, 11);
+    NB_TRAMPOLINE(Film);
 
     PyFilm(const Properties &props) : Film(props) { }
 
@@ -70,6 +70,14 @@ public:
         NB_OVERRIDE_PURE(to_string);
     }
 
+    void traverse(TraversalCallback *cb) override {
+        NB_OVERRIDE(traverse, cb);
+    }
+
+    void parameters_changed(const std::vector<std::string> &keys) override {
+        NB_OVERRIDE(parameters_changed, keys);
+    }
+
     using Film::m_flags;
     using Film::m_size;
     using Film::m_crop_size;
@@ -77,8 +85,6 @@ public:
     using Film::m_sample_border;
     using Film::m_filter;
     using Film::m_srf;
-
-    DR_TRAMPOLINE_TRAVERSE_CB(Film)
 };
 
 MI_PY_EXPORT(Film) {
@@ -108,6 +114,7 @@ MI_PY_EXPORT(Film) {
         .def("crop_size",
              [] (const Film *film) { return ScalarVector2u(film->crop_size()); },
              D(Film, crop_size))
+        .def("set_size", &Film::set_size, D(Film, set_size), "size"_a)
         .def("crop_offset",
              [] (const Film *film) { return ScalarPoint2u(film->crop_offset()); },
              D(Film, crop_offset))

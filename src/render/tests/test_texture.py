@@ -50,6 +50,9 @@ def test02_python_field_trampoline(variants_vec_backends_once_rgb):
         def out_dim(self):
             return 1
 
+        def __repr__(self):
+            return f"DummyTexture"
+
         def supports_scalar(self):
             return True
 

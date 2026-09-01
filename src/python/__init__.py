@@ -140,6 +140,9 @@ def set_variant(*args: str) -> None:
         # the newly active variant.
         _mitsuba_register_python_fields(old_variant, _variant)
 
+        # Modules of external plugin packages are (re)imported the same way
+        detail.load_plugins()
+
         # Invoke user-provided callbacks once the modules above have reloaded
         for callback in list(detail._variant_callbacks):
             callback(old_variant, _variant)
