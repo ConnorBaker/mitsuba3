@@ -1,11 +1,11 @@
 # Mitsuba 3, BUILT FROM SOURCE -- from THIS repository's own tree.
 #
-# WHERE THE SOURCE COMES FROM. `src` is a function argument; `nix/overlay.nix`
-# passes the flake's `self`, i.e. the checkout this file lives in. THE TREE
-# MUST INCLUDE THE SUBMODULES: a flake fetched without `?submodules=1` hands
-# `self` over WITHOUT `ext/`, and the top-level CMakeLists refuses to
-# configure ("The Mitsuba 3 dependencies are missing!"). The eval-time assert
-# below turns that into a readable error instead of a mid-build one.
+# WHERE THE SOURCE COMES FROM. `src` is the `../.` path -- the checkout this
+# file lives in, with no argument threading. THE TREE MUST INCLUDE THE
+# SUBMODULES: a flake fetched without `?submodules=1` is missing `ext/`, and
+# the top-level CMakeLists refuses to configure ("The Mitsuba 3 dependencies
+# are missing!"). The eval-time assert below turns that into a readable error
+# instead of a mid-build one.
 #
 # SPLIT MODE: SKBUILD forces `MI_SPLIT_MODE=ON` ("Wheels are always built in
 # split mode"), so the Python extension delegates to the compiled nanobind
@@ -33,7 +33,6 @@
 {
   lib,
   buildPythonPackage,
-  src,
   autoAddDriverRunpath,
   cmake,
   ninja,
@@ -54,22 +53,88 @@
   tinyformat,
   python,
   stdenv,
-  mitsubaVariants ? "scalar_rgb,cuda_ad_rgb,cuda_ad_spectral",
+  mitsubaVariants ? [
+    "scalar_rgb"
+    "cuda_ad_rgb"
+    "cuda_ad_spectral"
+  ],
 }:
+
+let
+  src = ../.;
+
+  # The variant grammar, straight from `resources/mitsuba.conf.template`:
+  # backend, then the optional `ad` feature (JIT backends only -- the template
+  # defines no scalar_ad_* variants), then a color representation, then the
+  # optional `polarized` and `double` features, in that order. This
+  # enumeration is exactly the 60 variant names the template defines;
+  # `MI_DEFAULT_VARIANTS` can only select among defined names, so anything
+  # outside this list would fail the build much later with a far worse error.
+  validVariants =
+    lib.concatMap
+      (
+        backend:
+        lib.concatMap (
+          ad:
+          lib.concatMap
+            (
+              color:
+              lib.concatMap
+                (
+                  pol:
+                  map (dbl: "${backend}${ad}_${color}${pol}${dbl}") [
+                    ""
+                    "_double"
+                  ]
+                )
+                [
+                  ""
+                  "_polarized"
+                ]
+            )
+            [
+              "mono"
+              "rgb"
+              "spectral"
+            ]
+        ) ([ "" ] ++ lib.optional (backend != "scalar") "_ad")
+      )
+      [
+        "scalar"
+        "llvm"
+        "cuda"
+      ];
+
+  unknownVariants = lib.subtractLists validVariants mitsubaVariants;
+in
 
 # The readable form of the missing-submodules failure -- see the note at the
 # top of this file. Checked at eval so `nix build .#mitsuba` (without
 # `?submodules=1`) fails in milliseconds with the fix in the message, instead
 # of after a source copy with CMake's generic complaint.
-assert lib.assertMsg (builtins.pathExists (
-  src + "/ext/drjit/ext/drjit-core/ext/nanothread/ext/cmake-defaults/CMakeLists.txt"
-)) ''
-  The mitsuba3 source tree is missing its submodules. Fetch the flake with
-  submodules enabled, e.g.:  nix build '.?submodules=1#mitsuba'  or, as an
-  input:  url = "github:ConnorBaker/mitsuba3?ref=<branch>&submodules=1";
+assert lib.assertMsg
+  (builtins.pathExists (
+    src + "/ext/drjit/ext/drjit-core/ext/nanothread/ext/cmake-defaults/CMakeLists.txt"
+  ))
+  ''
+    The mitsuba3 source tree is missing its submodules. Fetch the flake with
+    submodules enabled, e.g.:  nix build '.?submodules=1#mitsuba'  or, as an
+    input:  url = "github:ConnorBaker/mitsuba3?ref=<branch>&submodules=1";
+  '';
+assert lib.assertMsg (unknownVariants == [ ]) ''
+  mitsubaVariants contains unknown variant name(s): ${lib.concatStringsSep ", " unknownVariants}
+  A variant is <backend>[_ad]_<color>[_polarized][_double] with backend one of
+  scalar/llvm/cuda (ad requires llvm or cuda) and color one of
+  mono/rgb/spectral -- see resources/mitsuba.conf.template.
+'';
+assert lib.assertMsg (lib.elem "scalar_rgb" mitsubaVariants) ''
+  mitsubaVariants must include "scalar_rgb": Mitsuba's plugin registry and
+  `mitsuba.scalar_rgb` bootstrap path hard-require it
+  (resources/mitsuba.conf.template: 'the "scalar_rgb" variant *must* be
+  included at the moment').
 '';
 
-buildPythonPackage rec {
+buildPythonPackage (finalAttrs: {
   pname = "mitsuba";
   # MUST MATCH the version the built wheel declares, which scikit-build-core
   # reads from `include/mitsuba/mitsuba.h` (MI_VERSION_* + MI_VERSION_DEV).
@@ -139,7 +204,7 @@ buildPythonPackage rec {
 
   cmakeFlags = [
     (lib.cmakeFeature "CMAKE_LIBRARY_PATH" "${lib.getLib stdenv.cc.cc}/lib")
-    (lib.cmakeFeature "MI_DEFAULT_VARIANTS" mitsubaVariants)
+    (lib.cmakeFeature "MI_DEFAULT_VARIANTS" (lib.concatStringsSep "," mitsubaVariants))
     # Embree is the CPU/BVH ray-tracing backend. The default variants are
     # CUDA-only (OptiX supplies the acceleration structure there) and
     # `scalar_rgb` falls back to Mitsuba's own kd-tree, so building Embree's
@@ -254,7 +319,7 @@ buildPythonPackage rec {
     export HOME=$(mktemp -d)
   '';
 
-  pythonImportsCheck = [ "mitsuba" ];
+  pythonImportsCheck = [ finalAttrs.pname ];
 
   meta = {
     description = "Mitsuba 3: a retargetable forward and inverse renderer";
@@ -263,4 +328,4 @@ buildPythonPackage rec {
     platforms = [ "x86_64-linux" ];
     sourceProvenance = with lib.sourceTypes; [ fromSource ];
   };
-}
+})

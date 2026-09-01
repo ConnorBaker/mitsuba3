@@ -10,11 +10,10 @@
 # `nanobind3` is scoped here because Dr.Jit and Mitsuba pin nanobind 3.0.0
 # while consumers may rely on whatever their nixpkgs pins.
 #
-# ONE ARGUMENT, and it is a SOURCE, not a package. `mitsubaSrc` is the
-# mitsuba3 source tree -- `flake.nix` passes its own `self`, and it MUST have
-# been fetched with submodules (`?submodules=1`); `mitsuba.nix` asserts this
-# at eval time with the fix in the message.
-{ mitsubaSrc }:
+# The overlay takes no arguments: `mitsuba.nix` builds the tree this file
+# lives in (the `../.` path), which therefore MUST have been fetched with
+# submodules (`?submodules=1`) -- `mitsuba.nix` asserts this at eval time
+# with the fix in the message.
 _final: prev: {
   # NOT a Python package: a C++ header library that `mitsuba.nix` unvendors
   # out of `ext/tinyformat`. nixpkgs has no `tinyformat` attribute, so the
@@ -26,7 +25,7 @@ _final: prev: {
       nanobind3 = pythonFinal.callPackage ./nanobind.nix { };
       nanobind-backend = pythonFinal.callPackage ./nanobind-backend.nix { };
       drjit = pythonFinal.callPackage ./drjit.nix { };
-      mitsuba = pythonFinal.callPackage ./mitsuba.nix { src = mitsubaSrc; };
+      mitsuba = pythonFinal.callPackage ./mitsuba.nix { };
     })
   ];
 }

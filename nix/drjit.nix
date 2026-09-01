@@ -52,13 +52,13 @@
   hatch-fancy-pypi-readme,
   pathspec,
   pyproject-metadata,
-  llvmPackages_20,
+  llvmPackages,
   cudaPackages,
   python,
   stdenv,
 }:
 
-buildPythonPackage rec {
+buildPythonPackage (finalAttrs: {
   pname = "drjit";
   version = "1.6.0.dev1";
   pyproject = true;
@@ -94,7 +94,14 @@ buildPythonPackage rec {
   dontUseCmakeConfigure = true;
 
   buildInputs = [
-    llvmPackages_20.llvm.lib
+    # The DEFAULT llvmPackages on purpose, not a pinned major: drjit-core
+    # dlopens libLLVM.so at runtime and gates features on the version it
+    # finds -- its own llvm_api.cpp requires major >= 11 outright and >= 15/16
+    # for the new pass-builder / ORCv2 paths -- so any recent nixpkgs default
+    # satisfies it. (An earlier revision of this expression pinned
+    # llvmPackages_20; that was inherited packaging history, not a Dr.Jit
+    # requirement.)
+    llvmPackages.llvm.lib
     cudaPackages.cuda_cudart
     # libatomic, for nanothread's 16-byte compare-and-swap. GCC does not link
     # it implicitly, and `ext/drjit-core/ext/nanothread/CMakeLists.txt`
@@ -162,11 +169,11 @@ buildPythonPackage rec {
   # works only when the caller exports a variable is a trap for the next
   # person.
   postFixup = ''
-    patchelf --add-rpath ${lib.getLib llvmPackages_20.llvm}/lib \
+    patchelf --add-rpath ${lib.getLib llvmPackages.llvm}/lib \
       "$out/${python.sitePackages}/drjit/libdrjit-core.so"
   '';
 
-  pythonImportsCheck = [ "drjit" ];
+  pythonImportsCheck = [ finalAttrs.pname ];
 
   meta = {
     description = "Just-in-time compiler for differentiable rendering";
@@ -175,4 +182,4 @@ buildPythonPackage rec {
     platforms = [ "x86_64-linux" ];
     sourceProvenance = with lib.sourceTypes; [ fromSource ];
   };
-}
+})

@@ -26,14 +26,14 @@
   ninja,
 }:
 
-buildPythonPackage rec {
+buildPythonPackage (finalAttrs: {
   pname = "nanobind-backend";
   version = "1.0.0";
   pyproject = true;
 
   # The SAME checkout `nanobind.nix` builds from -- one pin, two packages.
-  src = nanobind3.src;
-  sourceRoot = "${src.name}/nanobind-backend";
+  inherit (nanobind3) src;
+  sourceRoot = "${finalAttrs.src.name}/nanobind-backend";
 
   build-system = [ scikit-build-core ];
 
@@ -60,4 +60,4 @@ buildPythonPackage rec {
     platforms = [ "x86_64-linux" ];
     sourceProvenance = with lib.sourceTypes; [ fromSource ];
   };
-}
+})

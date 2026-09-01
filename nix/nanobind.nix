@@ -25,7 +25,7 @@
   ninja,
 }:
 
-buildPythonPackage rec {
+buildPythonPackage (finalAttrs: {
   pname = "nanobind";
   version = "3.0.0";
   pyproject = true;
@@ -52,7 +52,7 @@ buildPythonPackage rec {
   # configure a second time in the wrong directory and abort the build.
   dontUseCmakeConfigure = true;
 
-  pythonImportsCheck = [ "nanobind" ];
+  pythonImportsCheck = [ finalAttrs.pname ];
 
   meta = {
     description = "Tiny and efficient C++/Python bindings";
@@ -61,4 +61,4 @@ buildPythonPackage rec {
     platforms = lib.platforms.all;
     sourceProvenance = with lib.sourceTypes; [ fromSource ];
   };
-}
+})
