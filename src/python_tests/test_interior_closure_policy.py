@@ -139,7 +139,6 @@ def test03_interior_mis_agrees_and_the_control_fails():
     # the path the two-sided probe in test_valid_specular_reflection cannot reach.
     # Smooth shading tilted off si.n so the correction frame is exercised too.
     mi.set_variant(_variant())
-    from mitsuba.python.ad.bsdfs import blender_principled as BP
 
     mix = _glassy(0.5)
     si = _make_si((0.4, 0.1, -0.9), sh_n=(0.25, 0.05, 0.967))
@@ -153,16 +152,25 @@ def test03_interior_mis_agrees_and_the_control_fails():
 
     # NEGATIVE CONTROL: drop the pre-mirror sign; the same check must fail, or this
     # probe could not see the bug it guards.
-    real = BP.BlenderPrincipledBSDF._eval_pdf_impl
+    #
+    # Patch `type(mix)`, NOT a class fetched by module path: the bsdfs package is
+    # importable as BOTH `mitsuba.python.ad.bsdfs` and `mitsuba.ad.bsdfs`, and those
+    # are two distinct module objects with two distinct classes. Whichever one the
+    # plugin registry bound is the one `load_dict` instantiates -- and that depends on
+    # which test imported which path first, so a module-path patch is order-dependent:
+    # green alone, silently a no-op after `test_ggx_glass_tables_oracle` (which pulls
+    # in `mitsuba.ad.bsdfs.tables`). Measured both ways before this spelling.
+    cls = type(mix)
+    real = cls._eval_pdf_impl
 
     def broken(self, attr, ctx, si, wo_, active, is_eval=True, wiz0=None):
         return real(self, attr, ctx, si, wo_, active, is_eval=is_eval, wiz0=None)
 
-    BP.BlenderPrincipledBSDF._eval_pdf_impl = broken
+    cls._eval_pdf_impl = broken
     try:
         bs2, _ = _sample_lanes(mix, si)
     finally:
-        BP.BlenderPrincipledBSDF._eval_pdf_impl = real
+        cls._eval_pdf_impl = real
     pq2 = mix.pdf(ctx, si, bs2.wo)
     rel2 = dr.select(bs2.pdf > 0.0,
                      dr.abs(bs2.pdf - pq2) / dr.maximum(bs2.pdf, 1e-9), 0.0)

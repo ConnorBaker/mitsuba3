@@ -144,37 +144,39 @@ def test02_the_threshold_property_holds_where_it_fires():
 
 def test03_piece3_reaches_glossy_and_only_glossy():
     mi.set_variant(_variant())
-    from mitsuba.python.ad.bsdfs import blender_principled as BP
 
     si = _make_si((-0.995, 0.0, 0.0999))
     wo = dr.normalize(mi.Vector3f(0.4, 0.2, 0.9))
     ctx = mi.BSDFContext()
     tilt = [0.9, 0.5, 0.8]
 
-    orig = BP.BlenderPrincipledBSDF._valid_reflection_frame
     ident = lambda self, si, frame, wiz0, attr: frame
 
-    # diffuse-only: identity-forced and real must agree exactly
+    # diffuse-only: identity-forced and real must agree exactly.
+    # Patch `type(<instance>)`, not a module-path class -- the bsdfs package
+    # double-imports under two module paths (see test04's control for the story).
     diff = _bsdf(nmap_color=tilt, metallic=0.0, spec_ior_level=0.0, roughness=0.9)
+    cls = type(diff)
+    orig = cls._valid_reflection_frame
     v1, p1 = diff.eval_pdf(ctx, si, wo)
-    BP.BlenderPrincipledBSDF._valid_reflection_frame = ident
+    cls._valid_reflection_frame = ident
     v0, p0 = diff.eval_pdf(ctx, si, wo)
-    BP.BlenderPrincipledBSDF._valid_reflection_frame = orig
+    cls._valid_reflection_frame = orig
     assert dr.max(dr.abs(v1 - v0))[0] == 0.0 and dr.abs(p1 - p0)[0] == 0.0
 
     # metallic at grazing: they must DIFFER (Cycles recovers a reflection the
     # uncorrected frame zeroes)
     met = _bsdf(nmap_color=tilt)
+    assert type(met) is cls
     v1, _ = met.eval_pdf(ctx, si, wo)
-    BP.BlenderPrincipledBSDF._valid_reflection_frame = ident
+    cls._valid_reflection_frame = ident
     v0, _ = met.eval_pdf(ctx, si, wo)
-    BP.BlenderPrincipledBSDF._valid_reflection_frame = orig
+    cls._valid_reflection_frame = orig
     assert dr.max(dr.abs(v1 - v0))[0] > 1e-4
 
 
 def test04_backface_sample_pdf_agrees_and_the_control_fails():
     mi.set_variant(_variant())
-    from mitsuba.python.ad.bsdfs import blender_principled as BP
 
     # Smooth shading alone triggers the correction: sh_frame tilted off si.n, no
     # normal map, so wi stays above the closure normal and samples survive.
@@ -194,14 +196,22 @@ def test04_backface_sample_pdf_agrees_and_the_control_fails():
     assert dr.max(rel)[0] < 1e-4, "back-face MIS: sample and query pdf disagree"
 
     # NEGATIVE CONTROL: drop the pre-mirror sign and the same check must fail.
-    real = BP.BlenderPrincipledBSDF._eval_pdf_impl
+    # Patch `type(ts)`, not a module-path class: the bsdfs package double-imports as
+    # `mitsuba.python.ad.bsdfs` AND `mitsuba.ad.bsdfs` (two distinct classes), and
+    # which one `load_dict` instantiates depends on import order across the suite --
+    # a module-path patch can silently miss the instance (caught in
+    # `test_interior_closure_policy`, where the ggx-table tests flipped the binding).
+    cls = type(ts)
+    real = cls._eval_pdf_impl
 
     def broken(self, attr, ctx, si, wo_, active, is_eval=True, wiz0=None):
         return real(self, attr, ctx, si, wo_, active, is_eval=is_eval, wiz0=None)
 
-    BP.BlenderPrincipledBSDF._eval_pdf_impl = broken
-    bs2, _ = ts.sample(ctx, si, s1, s2, mi.Bool(True))
-    BP.BlenderPrincipledBSDF._eval_pdf_impl = real
+    cls._eval_pdf_impl = broken
+    try:
+        bs2, _ = ts.sample(ctx, si, s1, s2, mi.Bool(True))
+    finally:
+        cls._eval_pdf_impl = real
     pq2 = ts.pdf(ctx, si, bs2.wo)
     rel2 = dr.select(bs2.pdf > 0.0,
                      dr.abs(bs2.pdf - pq2) / dr.maximum(bs2.pdf, 1e-9), 0.0)
