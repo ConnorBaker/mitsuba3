@@ -166,6 +166,52 @@ public:
         m_filter_glossy = m_filter_glossy_enabled ? 1.f / blur_glossy
                                                   : dr::Infinity<ScalarFloat>;
 
+        /* CONSISTENT path-space regularization -- the principled counterpart of
+           `blur_glossy` above, and fully independent of it (when both are enabled a
+           lobe takes the LARGER of the two floors, so neither weakens the other).
+
+           Kaplanyan and Dachsbacher, "Path Space Regularization for Holistic and
+           Robust Light Transport" (Computer Graphics Forum 32(2), Eurographics 2013),
+           Sect. 5.1: mollified Monte-Carlo estimation is CONSISTENT -- its bias
+           vanishes as the sample count grows -- iff the mollification bandwidth
+           shrinks with the sample index n inside O(n^{-1/d}) < r_n < O(1) (their
+           Eq. 6 / Theorem 2); "As a practical and simple sequence we suggest to use
+           rn = r0 n^{-lambda}, where r0 is the user-specified initial mollification
+           radius and lambda in (0; 1/d) for a d-dimensional mollification", and they
+           choose lambda = 1/6 for a single-vertex specular mollification (the angular
+           delta is d = 2). Weier, Droske, Hanika, Weidlich and Vorba, "Optimised Path
+           Space Regularisation" (Computer Graphics Forum 40(4), EGSR 2021), Sect. 4.2
+           carries the same sequence into ROUGHNESS space -- the added roughness obeys
+           h_n = h_0 n^{-lambda}, lambda in (0; 1/d) -- which is the form used here,
+           because a roughness floor is exactly what `si.min_alpha` already plumbs
+           into every microfacet lobe's sample/eval/pdf.
+
+           `regularize_roughness` is the initial floor r0 in microfacet-alpha units
+           (0 disables, the default: the integrator stays unbiased and byte-identical
+           to before). `regularize_decay` is lambda, refused outside the OPEN interval
+           (0, 1/2) that the d = 2 consistency condition allows: lambda = 0 never
+           shrinks the floor (blur_glossy's fixed bias, dressed up as this feature)
+           and lambda >= 1/2 shrinks it so fast the mollified estimator's variance
+           diverges -- both endpoints are exactly what Eq. 6 excludes.
+
+           Unlike `blur_glossy`, whose floor depends only on the path and never on n,
+           this floor decays toward zero, so the render converges to the
+           unregularized image as spp grows. Where it is applied -- and where not --
+           is decided at the shade point in the loop below. */
+        ScalarFloat reg_r0 = props.get<ScalarFloat>("regularize_roughness", 0.f);
+        if (reg_r0 < 0.f)
+            Throw("PathIntegrator: regularize_roughness must be non-negative (0 "
+                  "disables regularization); got %f", reg_r0);
+        ScalarFloat reg_lambda = props.get<ScalarFloat>("regularize_decay", 1.f / 6.f);
+        if (reg_lambda <= 0.f || reg_lambda >= 0.5f)
+            Throw("PathIntegrator: regularize_decay must lie in the open interval "
+                  "(0, 0.5) -- the consistency condition for a 2D angular "
+                  "mollification, O(n^{-1/2}) < r_n < O(1) (Kaplanyan & Dachsbacher "
+                  "2013, Eq. 6); got %f", reg_lambda);
+        m_regularize_enabled = reg_r0 != 0.f;
+        m_regularize_r0 = reg_r0;
+        m_regularize_lambda = reg_lambda;
+
         /* Cycles' per-lobe bounce budgets are deliberately not implemented (see the
            plugin docstring). Refuse the keys by name: silently ignoring them would
            render a different image than the scene asked for. */
@@ -211,9 +257,27 @@ public:
         Bool          prev_bsdf_delta = true;
         /* Smallest BSDF sampling density along the path so far -- Cycles'
            `INTEGRATOR_STATE(state, path, min_ray_pdf)`, initialised to FLT_MAX in
-           `kernel/integrator/path_state.h`. Only read when filter glossy is enabled. */
+           `kernel/integrator/path_state.h`. Only read when filter glossy or the
+           consistent regularization is enabled; the latter reads just its
+           FINITENESS, which flips exactly at the first REAL scattering event. */
         Float         min_ray_pdf     = dr::Infinity<Float>;
         BSDFContext   bsdf_ctx;
+
+        /* Consistent regularization: THIS sample's roughness floor,
+           r0 * n^{-lambda} with n the 1-BASED per-pixel sample index (Kaplanyan &
+           Dachsbacher 2013, Sect. 5.1, decayed in roughness space as in Weier et
+           al. 2021, Sect. 4.2 -- see the constructor). Constant along the path (one
+           lane is one sample) but per-LANE, not per-render: the megakernel launches
+           every sample of a pixel as its own lane of one wavefront, so the index
+           must come from the sampler's own per-lane bookkeeping
+           (`current_sample_index`, which also folds in the pass counter when spp is
+           split across passes) rather than from any scalar loop variable. Computed
+           once here and captured read-only by the loop body, like `ray_`. */
+        Float reg_alpha = 0.f;
+        if (m_regularize_enabled)
+            reg_alpha = m_regularize_r0 *
+                        dr::pow(Float(sampler->current_sample_index()) + 1.f,
+                                -m_regularize_lambda);
 
         /* Set up a Dr.Jit loop. This optimizes away to a normal loop in scalar
            mode, and it generates either a megakernel (default) or
@@ -308,7 +372,7 @@ public:
 
         dr::tie(ls) = dr::while_loop(dr::make_tuple(ls),
             [](const LoopState& ls) { return ls.active; },
-            [this, scene, bsdf_ctx, &ray_](LoopState& ls) {
+            [this, scene, bsdf_ctx, &ray_, reg_alpha](LoopState& ls) {
 
             /* dr::while_loop implicitly masks all code in the loop using the
                'active' flag, so there is no need to pass it to every function */
@@ -389,6 +453,42 @@ public:
                 si.min_alpha = dr::select(blur_pdf < 1.f,
                                           dr::sqrt(1.f - blur_pdf) * 0.5f, Float(0.f));
             }
+
+            /* Consistent regularization: raise this vertex's floor to the decaying
+               per-sample bandwidth computed before the loop (see the constructor for
+               the law and the citations). NEVER the camera-visible vertex: both
+               papers leave the first interaction untouched -- Kaplanyan &
+               Dachsbacher regularize selectively to keep directly-viewed transport
+               unbiased, and Weier et al. state outright that they "never alter the
+               first bounce" -- and that is what keeps a directly-viewed glossy
+               surface exact at any spp. The guard is the FINITENESS of
+               `min_ray_pdf` rather than `depth > 0`, and the difference is a
+               `null` pane: without a separate transparent budget a pass-through
+               increments `depth`, so a depth guard would regularize everything
+               behind a sheet of transparency -- the exact bug class Cycles'
+               `LABEL_TRANSPARENT` guard exists for (and that filter glossy's own
+               test06 polices). `min_ray_pdf` leaves infinity precisely at the
+               first REAL scattering event, which is the boundary both papers
+               draw. Beyond that the SELECTIVITY is structural
+               rather than branched: a diffuse lobe never reads `min_alpha`
+               (`filter_glossy_alpha` only reaches microfacet alphas) and a Delta
+               lobe has no alpha to raise, so in effect only NEAR-SPECULAR
+               interactions seen indirectly are mollified -- the selective rule of
+               Kaplanyan & Dachsbacher Sect. 4.3/4.4 expressed on the roughness
+               continuum, as Weier et al. do. Because `min_alpha` sits on the
+               interaction BEFORE `eval_pdf_sample`, the same regularized BSDF serves
+               NEE, the MIS weights and the bounce -- Weier et al.'s fast variant
+               ("regularising every vertex along a path and reusing the regularised
+               BSDF"), which keeps the estimator internally coherent. Composed with
+               filter glossy by MAX, so enabling one never weakens the other.
+               Residual, recorded rather than hidden: a PURE Delta chain (mirror
+               caustics from `conductor` rather than `roughconductor`) stays
+               unsampled, because a delta lobe cannot be widened through a roughness
+               floor -- that case needs true delta mollification (Kaplanyan &
+               Dachsbacher Sect. 4.2), which this plumbing does not reach. */
+            if (m_regularize_enabled)
+                dr::masked(si.min_alpha, ls.min_ray_pdf < dr::Infinity<Float>) =
+                    dr::maximum(si.min_alpha, reg_alpha);
 
             // ---------------------- Direct emission ----------------------
 
@@ -574,7 +674,7 @@ public:
                  unguided_bsdf_pdf, min_ray_pdf);` (`kernel/integrator/shade_surface.h`).
                A pass-through is not a scattering event and must not tighten the bound --
                otherwise a stack of transparent surfaces would blur everything behind it. */
-            if (m_filter_glossy_enabled) {
+            if (m_filter_glossy_enabled || m_regularize_enabled) {
                 /* `si.is_valid()` is DEFENSIVE, and unlike the Null test it is not
                    currently load-bearing -- said plainly because the first version of this
                    comment claimed otherwise. The reasoning that motivated it is sound as
@@ -741,6 +841,12 @@ public:
     /// Cycles' `filter_glossy`, already inverted (1 / the UI's `blur_glossy`).
     ScalarFloat m_filter_glossy = dr::Infinity<ScalarFloat>;
     bool m_filter_glossy_enabled = false;
+
+    /// Consistent regularization: initial roughness floor r0 (0 disables).
+    ScalarFloat m_regularize_r0 = 0.f;
+    /// Decay exponent lambda of the per-sample floor r0 * n^{-lambda}, in (0, 1/2).
+    ScalarFloat m_regularize_lambda = 1.f / 6.f;
+    bool m_regularize_enabled = false;
 
     /**
      * \brief March a shadow ray through `null` boundaries and return its transmittance.
