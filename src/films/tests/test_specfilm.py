@@ -204,3 +204,45 @@ def test07_srf(variants_all_spectral):
 
     dr.allclose(params[key_range], [400, 800])
     dr.allclose(params[key_values], [0.1, 0.2, 0., 0.3, 0.4])
+
+
+def test08_srf_shape_reaches_the_pixel(variants_all_spectral):
+    """A channel's value is the integral of srf * L, not the integral of L.
+
+    The whole reason a specfilm exists is that the SRF's SHAPE weights the radiance --
+    and for a while it did not: the sensor's sample_wavelengths was fixed to return the
+    true inverse sampling PDF (upstream PR #1710's sensor half) while prepare_sample
+    here still divided by eval(SRF), so the two cancelled and every channel read the
+    plain integral of L over the SRF's support. Every earlier test in this file is
+    constructional and could not see that. One channel, SRF ramp 500:1 -> 700:2 ->
+    750:3, unit constant emitter: correct = trapezoid = 425; the double-cancellation
+    bias = 750 - 500 = 250. The two predictions are 41% apart, so a 10% tolerance
+    separates them decisively at low spp.
+    """
+    import numpy as np
+
+    scene = mi.load_dict({
+        'type': 'scene',
+        'integrator': {'type': 'path', 'max_depth': 2},
+        'emitter': {'type': 'constant',
+                    'radiance': {'type': 'uniform', 'value': 1.0}},
+        'sensor': {
+            'type': 'perspective',
+            'film': {
+                'type': 'specfilm',
+                'width': 4, 'height': 4,
+                'srf_ramp': {
+                    'type': 'irregular',
+                    'wavelengths': '500, 700, 750',
+                    'values': '1.0, 2.0, 3.0',
+                },
+            },
+            'sampler': {'type': 'independent', 'sample_count': 512},
+        },
+    })
+    mean = float(np.asarray(mi.render(scene, spp=512))[..., 0].mean())
+    correct = 425.0     # trapezoid of the ramp times L = 1
+    biased = 250.0      # integral of L over [500, 750]: the double-cancellation reading
+    assert abs(mean - correct) / correct < 0.10, \
+        f"channel mean {mean:.2f}: SRF shape is not reaching the pixel " \
+        f"(double-cancellation predicts {biased:.0f})"

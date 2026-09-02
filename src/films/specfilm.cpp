@@ -296,10 +296,18 @@ public:
         SurfaceInteraction3f si = dr::zeros<SurfaceInteraction3f>();
         si.wavelengths = wavelengths;
 
-        // The SRF is not necessarily normalized, cancel out multiplicative factors
-        UnpolarizedSpectrum inv_spec = m_srf->eval(si);
-        inv_spec = dr::select(inv_spec != 0.f, dr::rcp(inv_spec), 1.f);
-        UnpolarizedSpectrum values = spec * inv_spec;
+        /* `spec` already carries the true inverse wavelength-sampling PDF: the
+           sensor's `sample_wavelengths` weights each sample by integral/eval of the
+           SRF it inherited from this film (sensor.cpp -- the other half of upstream
+           PR #1710, applied there as 217be112). This function used to divide by
+           eval(SRF) a SECOND time, which cancelled the SRF's SHAPE out of every
+           channel: measured with one channel, SRF ramp 500nm:1 -> 700nm:2 -> 750nm:3
+           and a unit constant emitter, the pixel read 249.8 (the plain integral of L
+           over the support) against the correct 425 (the integral of srf * L). The
+           two halves were self-consistent BEFORE the sensor fix -- this division
+           undid the constant-integral weight -- so this line had to change in the
+           same motion as the sensor; see `test08_srf_shape_reaches_the_pixel`. */
+        const UnpolarizedSpectrum &values = spec;
 
         for (size_t j = 0; j < m_srfs.size(); ++j) {
             UnpolarizedSpectrum weights = m_srfs[j]->eval(si);
