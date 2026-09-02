@@ -169,8 +169,10 @@ def test04_eval_rgb(variants_vec_backends_once_rgb):
     si.uv = [x, y]
 
     mono = bitmap.eval_1(si)
-    with pytest.raises(RuntimeError):
-        color = bitmap.eval_3(si)
+    # HSR (a89facc4): eval_3() on a 1-channel bitmap broadcasts instead of
+    # throwing, matching eval() and Cycles' make_float4(f, f, f, 1).
+    color = bitmap.eval_3(si)
+    assert dr.allclose(color, mi.Color3f(mono))
     spec = bitmap.eval(si)
 
     expected = 0.5395
@@ -220,8 +222,10 @@ def test05_eval_spectral(variants_vec_backends_once_spectral):
     si.uv = [x, y]
 
     mono = bitmap.eval_1(si)
-    with pytest.raises(RuntimeError):
-        color = bitmap.eval_3(si)
+    # HSR (a89facc4): eval_3() on a 1-channel bitmap broadcasts instead of
+    # throwing, matching eval() and Cycles' make_float4(f, f, f, 1).
+    color = bitmap.eval_3(si)
+    assert dr.allclose(color, mi.Color3f(mono))
     spec = bitmap.eval(si)
 
     expected = 0.5394
