@@ -1,96 +1,70 @@
-"""Blender's per-lobe bounce budgets on the `path` integrator.
+"""The `path` integrator REFUSES Cycles' per-lobe bounce budgets, and says why.
 
-Cycles does not have one bounce limit, it has five, and the counting rule is not the obvious
-one. These tests pin the two halves that are easy to get wrong and impossible to notice:
+This file used to pin the transcription of Blender's `diffuse_bounces` / `glossy_bounces` /
+`transmission_bounces` (the ladder equivalence, the after-increment counting rule, the
+reflect-vs-transmit partition). Those budgets were REMOVED on 2026-09-02: truncating
+transport per lobe is a nonphysical variance control, and the project's posture is to
+evaluate Cycles' hacks rather than replicate them -- parity with a Blender scene whose
+budgets bind is achieved by raising the scene's per-lobe bounces to `max_bounces`, not by
+truncating Mitsuba the same way. The history of the transcription (and its measured
+furnace ladder) is in git; the transparent budget SURVIVES, because a null crossing is not
+a scattering event at all -- its behaviour is pinned in `test_transparent_boundaries.py`.
 
-* the ladder equivalence -- in an all-diffuse scene `diffuse_max_depth` truncates the SAME
-  walk that `max_depth` truncates, so the two must agree exactly rather than merely closely;
-* the partition -- a budget may only ever be tripped by a bounce of its own kind, so a glossy
-  or transmission budget must be INERT in a scene that has no such lobe. That one is a
-  regression test for a real defect: comparing the counters unconditionally reads
-  `glossy_depth >= 0` as exhausted before any glossy bounce has happened, and
-  `glossy_max_depth = 0` killed every path at its first vertex.
+What must hold now:
 
-The tolerance is not a Monte-Carlo tolerance. The two arms of the ladder terminate at the same
-vertex and therefore draw the same random numbers, so they are the same computation; measured
-run-to-run nondeterminism of the renderer itself (block accumulation order) is ~5e-8 per pixel.
+* the constructor REFUSES the removed keys BY NAME -- silently ignoring them would render
+  a different image than the scene asked for, and Mitsuba's unqueried-property warning is
+  not loud enough to carry that;
+* the refusal is TARGETED -- `transparent_max_depth` (kept) must still load; this is the
+  negative control that separates "refuses removed budgets" from "refuses everything";
+* an explicit `transparent_max_depth = -1` stays bit-inert against not mentioning it.
 """
 
 import pytest
 import numpy as np
-import drjit as dr
 import mitsuba as mi
 
-RES = 48
-SPP = 128
-# Far above the renderer's own run-to-run spread, far below the ~1% gap between ladder rungs.
+RES = 32
+SPP = 64
+# The two arms are the same computation; measured run-to-run nondeterminism ~5e-8/px.
 RTOL = 1e-5
 
+REMOVED = ["diffuse_max_depth", "glossy_max_depth", "transmission_max_depth"]
 
-def _render(dielectric=False, **integrator):
+
+def _scene_dict(**integrator):
     d = mi.cornell_box()
     d['integrator'] = dict(type='path', **integrator)
     d['sensor']['film']['width'] = RES
     d['sensor']['film']['height'] = RES
     d['sensor']['sampler']['sample_count'] = SPP
-    if dielectric:
-        # A refracting sphere, so the scene has transmission events at all. Everything else in
-        # the Cornell box is diffuse.
-        d['glass_ball'] = {
-            'type': 'sphere',
-            'to_world': mi.ScalarTransform4f().translate([0.0, -0.5, 0.2]).scale(0.25),
-            'bsdf': {'type': 'dielectric'},
-        }
-    return float(np.asarray(mi.render(mi.load_dict(d), spp=SPP)).mean())
+    return d
 
 
-@pytest.mark.parametrize("k", [1, 2, 3, 4, 5, 6])
-def test01_diffuse_budget_reproduces_the_depth_ladder(variant_scalar_rgb, k):
-    """In an all-diffuse scene the two truncations are the same truncation.
-
-    `max_depth` counts path VERTICES and `diffuse_max_depth` counts diffuse BOUNCES, so the
-    correspondence is off by one. If it were off by two, the budget would be spending an extra
-    bounce -- which is exactly the error that made the previous `transparent_max_depth`
-    workaround render 20% bright.
-    """
-    assert _render(max_depth=-1, diffuse_max_depth=k) == \
-        pytest.approx(_render(max_depth=k + 1), rel=RTOL)
+def _render(**integrator):
+    return float(np.asarray(
+        mi.render(mi.load_dict(_scene_dict(**integrator)), spp=SPP)).mean())
 
 
-def test02_zero_and_one_are_the_same_budget(variant_scalar_rgb):
-    """Cycles compares each count AFTER incrementing it (`bounce >= max`), so a budget of 0
-    and a budget of 1 both permit exactly one bounce of that kind. This is surprising enough
-    to be worth pinning: it is not an off-by-one, it is the upstream rule."""
-    assert _render(max_depth=-1, diffuse_max_depth=0) == \
-        pytest.approx(_render(max_depth=-1, diffuse_max_depth=1), rel=RTOL)
+@pytest.mark.parametrize("key", REMOVED)
+def test01_removed_budget_keys_are_refused_by_name(variant_scalar_rgb, key):
+    """A scene naming a removed budget must fail to LOAD, and the error must name the key
+    and point at the remedy -- a reader holding an old exported scene gets the migration
+    instruction in the traceback, not a silently different image."""
+    with pytest.raises(RuntimeError, match=key):
+        mi.load_dict(_scene_dict(max_depth=6, **{key: 4}))
 
 
-@pytest.mark.parametrize("budget", ["glossy_max_depth", "transmission_max_depth"])
-def test03_a_budget_is_inert_without_a_bounce_of_its_kind(variant_scalar_rgb, budget):
-    """The strictest possible setting of a budget no lobe in the scene can spend must change
-    nothing at all. Zero is the strictest, and zero is where the naive spelling fails."""
-    assert _render(max_depth=-1, **{budget: 0}) == \
-        pytest.approx(_render(max_depth=-1), rel=RTOL)
+def test02_the_refusal_is_targeted(variant_scalar_rgb):
+    """NEGATIVE CONTROL: `transparent_max_depth` is kept, so it must still load and render.
+    Without this, test01 is satisfied by a constructor that refuses every unknown key --
+    a gate that can only say no proves nothing by saying it."""
+    val = _render(max_depth=6, transparent_max_depth=8)
+    assert np.isfinite(val) and val > 0.0
 
 
-def test04_transmission_is_charged_to_transmission(variant_scalar_rgb):
-    """Add a refracting sphere and the transmission budget bites -- while a diffuse budget set
-    far above anything the scene can reach does not. That is the reflect-vs-transmit partition:
-    a transmission increments `transmission_bounce` and nothing else."""
-    free = _render(dielectric=True, max_depth=-1)
-    cut  = _render(dielectric=True, max_depth=-1, transmission_max_depth=0)
-    assert cut != pytest.approx(free, rel=1e-3), (cut, free)
-    assert cut < free, (cut, free)
-
-    # And the cut is the transmission budget's doing, not a side effect of turning the
-    # machinery on: a diffuse budget above the scene's reach leaves the image alone.
-    assert _render(dielectric=True, max_depth=-1, diffuse_max_depth=64) == \
-        pytest.approx(free, rel=RTOL)
-
-
-def test05_unset_budgets_change_nothing(variants_all_rgb):
-    """The default must be inert in every variant -- this is the guard on every scene that
-    does not mention the feature at all."""
-    assert _render(max_depth=6, transparent_max_depth=-1, diffuse_max_depth=-1,
-                   glossy_max_depth=-1, transmission_max_depth=-1) == \
+def test03_explicit_default_is_inert(variants_all_rgb):
+    """`transparent_max_depth = -1` spelled out must equal not mentioning it, in every
+    variant -- the guard on every scene that does not use the feature."""
+    assert _render(max_depth=6, transparent_max_depth=-1) == \
         pytest.approx(_render(max_depth=6), rel=RTOL)

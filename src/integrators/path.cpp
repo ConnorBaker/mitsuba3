@@ -28,26 +28,15 @@ Path tracer (:monosp:`path`)
    - A separate budget for :monosp:`null` (transparent) interactions, matching Blender's
      :monosp:`transparent_max_bounces`. Passing through a transparent surface is not a
      scattering event, so with this set it is counted here instead of against
-     :monosp:`max_depth`. (Default: -1, i.e. charge null interactions to :monosp:`max_depth`
-     as before)
+     :monosp:`max_depth`. Cycles stores :monosp:`transparent_max_bounce` verbatim (no
+     plus-one, unlike its lobe budgets), so pass Blender's value unchanged. (Default: -1,
+     i.e. charge null interactions to :monosp:`max_depth` as before)
 
- * - diffuse_max_depth, glossy_max_depth, transmission_max_depth
-   - |int|
-   - Per-lobe bounce budgets, matching Blender's :monosp:`diffuse_bounces`,
-     :monosp:`glossy_bounces` and :monosp:`transmission_bounces`. They partition
-     reflect-vs-transmit first, exactly as Cycles does: a transmission is charged to
-     :monosp:`transmission_max_depth` and to nothing else, so a *diffuse* transmission
-     (translucency) does not spend the diffuse budget. Exceeding a budget does not stop the
-     path immediately: the next surface is still reached and its emission still collected,
-     but it gets no direct lighting and no further bounce -- the same truncation
-     :monosp:`max_depth` already performs. Cycles compares each count *after* incrementing
-     it, against a kernel value that is Blender's setting **plus one**
-     (:monosp:`scene/integrator.cpp`, ``max_diffuse_bounce = max_diffuse_bounce + 1``), so
-     Blender's :monosp:`diffuse_bounces` = N permits exactly N diffuse bounces and N = 0
-     permits none. Pass N + 1 here to reproduce that kernel value verbatim.
-     :monosp:`transparent_max_depth` is the exception in both engines: Cycles stores it
-     WITHOUT the plus-one, so pass Blender's :monosp:`transparent_max_bounces` unchanged.
-     (Default: -1 each, i.e. unlimited)
+     Cycles' remaining per-lobe budgets (:monosp:`diffuse_bounces`,
+     :monosp:`glossy_bounces`, :monosp:`transmission_bounces`) are deliberately NOT
+     implemented: truncating transport per lobe is a nonphysical variance control. The
+     constructor refuses those property names rather than ignoring them; for Cycles
+     parity, raise the Blender scene's per-lobe bounces to :monosp:`max_bounces`.
 
  * - rr_depth
    - |int|
@@ -177,12 +166,15 @@ public:
         m_filter_glossy = m_filter_glossy_enabled ? 1.f / blur_glossy
                                                   : dr::Infinity<ScalarFloat>;
 
-        m_diffuse_max_depth      = props.get<int>("diffuse_max_depth", -1);
-        m_glossy_max_depth       = props.get<int>("glossy_max_depth", -1);
-        m_transmission_max_depth = props.get<int>("transmission_max_depth", -1);
-
-        m_lobe_budgets = m_transparent_max_depth >= 0 || m_diffuse_max_depth >= 0 ||
-                         m_glossy_max_depth >= 0 || m_transmission_max_depth >= 0;
+        /* Cycles' per-lobe bounce budgets are deliberately not implemented (see the
+           plugin docstring). Refuse the keys by name: silently ignoring them would
+           render a different image than the scene asked for. */
+        for (const char *removed : { "diffuse_max_depth", "glossy_max_depth",
+                                     "transmission_max_depth" })
+            if (props.has_property(removed))
+                Throw("PathIntegrator: \"%s\" was removed (a nonphysical Cycles parity "
+                      "shim). For Cycles parity, raise the Blender scene's per-lobe "
+                      "bounces to max_bounces instead.", removed);
     }
 
     std::pair<Spectrum, Bool> sample(const Scene *scene,
@@ -204,11 +196,8 @@ public:
         Float eta                     = 1.f;
         PreliminaryIntersection3f pi  = dr::zeros<PreliminaryIntersection3f>();
         UInt32 depth                  = 0;
-        // Per-lobe budgets (\ref m_lobe_budgets); all inert unless one was configured.
+        // Null (transparent) crossings, budgeted separately (\ref m_separate_null_budget).
         UInt32 null_depth             = 0;
-        UInt32 diffuse_depth          = 0;
-        UInt32 glossy_depth           = 0;
-        UInt32 transmission_depth     = 0;
         /* Raised when a budget runs out, spent one iteration LATER -- see the stopping
            criterion, where the reason it cannot be spent immediately is set out. */
         Bool   stop_next              = false;
@@ -240,9 +229,6 @@ public:
             Float eta;
             UInt32 depth;
             UInt32 null_depth;
-            UInt32 diffuse_depth;
-            UInt32 glossy_depth;
-            UInt32 transmission_depth;
             Bool stop_next;
             Mask valid_ray;
             Interaction3f prev_si;
@@ -257,7 +243,7 @@ public:
             Sampler* sampler;
 
             DRJIT_STRUCT(LoopState, ray, pi, throughput, result, eta, depth, \
-                null_depth, diffuse_depth, glossy_depth, transmission_depth, stop_next,
+                null_depth, stop_next,
                 valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta, min_ray_pdf,
                 ray_visibility, active, sampler)
         } ls = {
@@ -268,9 +254,6 @@ public:
             eta,
             depth,
             null_depth,
-            diffuse_depth,
-            glossy_depth,
-            transmission_depth,
             stop_next,
             valid_ray,
             prev_si,
@@ -435,7 +418,7 @@ public:
             }
 
             // Continue tracing the path at this point?
-            /* `stop_next` carries an exhausted per-lobe budget forward by one vertex, and
+            /* `stop_next` carries an exhausted transparent budget forward by one vertex, and
                it belongs HERE, folded into `active_next`, rather than after the bounce.
                Cycles' terminate flags are all covered by `PATH_RAY_TERMINATE`, and
                `surface_shader_prepare_closures` reads that as `max_closures = 0`: the next
@@ -647,17 +630,6 @@ public:
             }
 
             Mask charged_null = at_surface && lobe_null;
-            Mask charged_transmission = false, charged_diffuse = false,
-                 charged_glossy = false;
-            if (m_lobe_budgets) {
-                Mask scattered = at_surface && !lobe_null;
-                charged_transmission = scattered && lobe_transmit;
-                charged_diffuse      = scattered && !lobe_transmit && lobe_diffuse;
-                charged_glossy       = scattered && !lobe_transmit && !lobe_diffuse;
-                dr::masked(ls.transmission_depth, charged_transmission) += 1;
-                dr::masked(ls.diffuse_depth, charged_diffuse) += 1;
-                dr::masked(ls.glossy_depth, charged_glossy) += 1;
-            }
 
             Float throughput_max = dr::max(unpolarized_spectrum(ls.throughput));
 
@@ -673,50 +645,21 @@ public:
             ls.active = active_next && (!rr_active || rr_continue) &&
                         (throughput_max != 0.f);
 
-            /* Raise the flag; `active_next` above spends it on the next iteration. A budget
-               running out does not stop the path where it ran out -- the next surface is
-               still reached and its emission still collected.
+            /* Raise the flag; `active_next` above spends it on the next iteration. The
+               budget running out does not stop the path where it ran out -- the next
+               surface is still reached and its emission still collected, which is Cycles'
+               `TERMINATE_ON_NEXT_SURFACE`, the flag its transparent budget raises.
 
                `>=` and not `>`: Cycles compares the count AFTER incrementing it
-               (`kernel/integrator/path_state.h`), so a budget of D buys D bounces of that
-               kind and a budget of 0 buys none. Note this is the KERNEL's number, which for
-               every lobe budget is Blender's setting plus one (`scene/integrator.cpp`:
-               "Plus one so that a bounce of 0 indicates no global illumination, only direct
-               illumination"); the exporter adds that one. The only budget Cycles stores
-               verbatim is `transparent_max_bounce` -- and it is the only one where 0 and 1
-               do behave alike, which Cycles' own FIXME in `path_state.h` calls out. Do not
-               generalise that quirk to the lobe budgets; they do not share it.
-
-               Known divergence, stated rather than hidden: Cycles distinguishes
-               `TERMINATE_ON_NEXT_SURFACE` (the transparent budget) from
-               `TERMINATE_AFTER_TRANSPARENT` (the lobe budgets), and the latter keeps crossing
-               transparent surfaces, collecting emission, until it meets an opaque one. This
-               stops at the first surface of either kind. The two agree wherever no transparent
-               surface stands between the exhausted vertex and the next opaque one. */
-            if (m_lobe_budgets) {
-                /* Each comparison is gated on having just CHARGED that counter, which is
-                   not decoration -- it is where Cycles puts it. There the test lives inside
-                   the branch that did the increment, so a budget can only ever be tripped by
-                   a bounce of its own kind. Comparing the counters unconditionally instead
-                   reads `glossy_depth >= 0` as exhausted in a scene with no glossy lobe at
-                   all, and a budget of 0 would kill every path at the first vertex. */
-                Mask exhausted = false;
-                if (m_transparent_max_depth >= 0)
-                    exhausted |= charged_null &&
-                                 ls.null_depth >= (uint32_t) m_transparent_max_depth;
-                if (m_diffuse_max_depth >= 0)
-                    exhausted |= charged_diffuse &&
-                                 ls.diffuse_depth >= (uint32_t) m_diffuse_max_depth;
-                if (m_glossy_max_depth >= 0)
-                    exhausted |= charged_glossy &&
-                                 ls.glossy_depth >= (uint32_t) m_glossy_max_depth;
-                if (m_transmission_max_depth >= 0)
-                    exhausted |= charged_transmission &&
-                                 ls.transmission_depth >=
-                                     (uint32_t) m_transmission_max_depth;
-
-                ls.stop_next |= exhausted;
-            }
+               (`kernel/integrator/path_state.h`). It stores `transparent_max_bounce`
+               verbatim (no plus-one, unlike the lobe budgets it also carries -- which is
+               why 0 and 1 behave alike there; Cycles' own FIXME in `path_state.h` calls
+               that out). The comparison is gated on having just CHARGED the counter,
+               which is where Cycles puts it: the budget can only ever be tripped by a
+               crossing of its own kind. */
+            if (m_separate_null_budget)
+                ls.stop_next |= charged_null &&
+                                ls.null_depth >= (uint32_t) m_transparent_max_depth;
 
             if (unlikely(scene->has_ray_visibility_masks())) {
                 /* Blender-style per-object ray visibility (\ref RayVisibility). Which switch
@@ -784,30 +727,20 @@ public:
         return tfm::format("PathIntegrator[\n"
             "  max_depth = %u,\n"
             "  transparent_max_depth = %i,\n"
-            "  diffuse_max_depth = %i,\n"
-            "  glossy_max_depth = %i,\n"
-            "  transmission_max_depth = %i,\n"
             "  rr_depth = %u\n"
-            "]", m_max_depth, m_transparent_max_depth, m_diffuse_max_depth,
-            m_glossy_max_depth, m_transmission_max_depth, m_rr_depth);
+            "]", m_max_depth, m_transparent_max_depth, m_rr_depth);
     }
 
     /// Separate bounce budget for `null` (transparent) interactions; -1 disables it
     int m_transparent_max_depth = -1;
     bool m_separate_null_budget = false;
 
-    /// Blender's remaining per-lobe budgets; -1 each disables that one
     ScalarFloat m_clamp_direct   = dr::Infinity<ScalarFloat>;
     ScalarFloat m_clamp_indirect = dr::Infinity<ScalarFloat>;
     bool m_clamp_enabled = false;
     /// Cycles' `filter_glossy`, already inverted (1 / the UI's `blur_glossy`).
     ScalarFloat m_filter_glossy = dr::Infinity<ScalarFloat>;
     bool m_filter_glossy_enabled = false;
-    int m_diffuse_max_depth = -1;
-    int m_glossy_max_depth = -1;
-    int m_transmission_max_depth = -1;
-    /// True when ANY of the four per-lobe budgets is in use
-    bool m_lobe_budgets = false;
 
     /**
      * \brief March a shadow ray through `null` boundaries and return its transmittance.
