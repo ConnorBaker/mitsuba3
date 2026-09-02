@@ -101,10 +101,24 @@ Sensor<Float, Spectrum>::sample_wavelengths(const SurfaceInteraction3f& /*si*/, 
                                             Mask active) const {
     if constexpr (is_spectral_v<Spectrum>) {
         if (m_srf != nullptr) {
-            return m_srf->sample_spectrum(
-                    dr::zeros<SurfaceInteraction3f>(),
-                    math::sample_shifted<Wavelength>(sample),
-                    active);
+            /* HSR (upstream PR #1710): a sensor-level SRF importance-samples the
+               wavelength axis, so the Monte Carlo weight must be the INVERSE PDF --
+               integral/eval at the sampled wavelength -- exactly as the default
+               sample_wavelength() path returns 1/pdf. sample_spectrum()'s second
+               return is eval/pdf, which for a distribution-backed spectrum collapses
+               to the curve's INTEGRAL: a constant. That silently multiplies the
+               measurement by the SRF a second time (hdrfilm applies the response at
+               develop), and an SRF numerically equal to the default sampling PDF --
+               which should reproduce the default arm exactly -- instead returned a
+               flat weight (measured by test/regression/_mitsuba_srf_weight_contract
+               before this fix; its verdict assert flips when this lands). */
+            SurfaceInteraction3f si2 = dr::zeros<SurfaceInteraction3f>();
+            auto [wavelengths, unused] = m_srf->sample_spectrum(
+                    si2, math::sample_shifted<Wavelength>(sample), active);
+            si2.wavelengths = wavelengths;
+            Wavelength pdf = m_srf->pdf_spectrum(si2, active);
+            Spectrum weight = dr::select(pdf > 0.f, dr::rcp(pdf), 0.f);
+            return { wavelengths, weight };
         }
     } else {
         DRJIT_MARK_USED(active);
