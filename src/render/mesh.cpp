@@ -483,7 +483,22 @@ MI_VARIANT void Mesh<Float, Spectrum>::build_pmf() {
 
         Float face_surface_area = .5f * dr::norm(dr::cross(p1 - p0, p2 - p0));
 
-        m_area_pmf = DiscreteDistribution<Float>(dr::detach(face_surface_area));
+        /* HSR (drjit-core #211): building the CDF on the device runs
+           dr::prefix_sum over a float array, which is bit-NONDETERMINISTIC from
+           ~16k elements on the CUDA backend (measured on this pin by
+           test/regression/_cuda_prefix_sum_determinism: 10/10 distinct bit
+           patterns at 32768 on identical input, integer control clean). A mesh
+           area emitter's sampling CDF built that way pins different render
+           bytes on identical scenes. The CDF is built ONCE at load, so
+           determinism is bought where it is cheap: read the areas back and use
+           the scalar constructor, whose serial double-precision accumulation is
+           deterministic by construction. AD is unaffected -- this path always
+           detached the areas. */
+        Float areas = dr::detach(face_surface_area);
+        dr::eval(areas);
+        auto&& areas_host = dr::migrate(areas, JitBackend::None);
+        dr::sync_thread();
+        m_area_pmf = DiscreteDistribution<Float>(areas_host.data(), m_face_count);
     }
 }
 
