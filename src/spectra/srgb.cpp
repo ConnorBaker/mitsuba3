@@ -96,6 +96,35 @@ public:
         return mean();
     }
 
+    /* THE DENSITY OF `sample_spectrum()` BELOW, which maps a uniform `sample` affinely
+       onto [MI_CIE_MIN, MI_CIE_MAX] ("TODO: better sampling strategy") -- so the density is
+       the constant `1 / (MI_CIE_MAX - MI_CIE_MIN)` inside that range and 0 outside it.
+       The base `SurfaceField::pdf_spectrum` throws, which was harmless while nothing asked:
+       `sample_spectrum` returns eval/pdf directly and never consults this.  It stopped being
+       harmless when `Sensor::sample_wavelengths` began weighting a sensor-level `srf` by the
+       true inverse sampling PDF (this fork's ef5383de, porting upstream PR #1710's reading)
+       -- an `srf` of type `rgb`/`srgb` then raised at render time where the previous
+       `sample_spectrum` path had worked.  The value is not a guess or a fallback: it is
+       exactly the density of the sampling routine immediately below, and it must be kept in
+       step with it if that TODO is ever taken up. */
+    Wavelength pdf_spectrum(const SurfaceInteraction3f &si, Mask active) const override {
+        MI_MASKED_FUNCTION(ProfilerPhase::TextureEvaluate, active);
+
+        if constexpr (is_spectral_v<Spectrum>) {
+            /* `active` is a per-LANE mask and the range test is per-WAVELENGTH (4 wide),
+               so they do not combine with `&=`; this plugin's own `eval` above ignores
+               `active` for the same reason -- the caller masks the result. */
+            return dr::select(
+                (si.wavelengths >= (ScalarFloat) MI_CIE_MIN) &&
+                    (si.wavelengths <= (ScalarFloat) MI_CIE_MAX),
+                Wavelength(1.f / (ScalarFloat) (MI_CIE_MAX - MI_CIE_MIN)),
+                Wavelength(0.f));
+        } else {
+            DRJIT_MARK_USED(si);
+            NotImplementedError("pdf");
+        }
+    }
+
     std::pair<Wavelength, UnpolarizedSpectrum>
     sample_spectrum(const SurfaceInteraction3f &_si,
                     const Wavelength &sample,

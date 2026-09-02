@@ -40,18 +40,45 @@ def _ensure_registered():
     if variant in _PLUGIN:
         return
 
-    class WiCosine(mi.Texture):
+    class WiCosine(mi.Field):
         """Radiance equal to the cosine of the emitted direction, `si.wi.z`.
 
         `varying` selects which branch of `area::sample_direction` builds the interaction. It
         is a plugin PROPERTY rather than a closure variable so that one class can serve both.
+
+        Ported to the Field API: spectral `Field::eval(si, active)` dispatches through
+        `out_type()` to `eval_color3`, so the old `eval` body lives there now.
         """
 
         def __init__(self, props):
-            mi.Texture.__init__(self, props)
+            mi.Field.__init__(self, props)
             self._varying = bool(props.get('varying', True))
 
-        def eval(self, si, active=True):
+        def out_type(self):
+            return mi.FieldValueType.Color3
+
+        def domain(self):
+            return mi.FieldDomain.Surface
+
+        def out_dim(self):
+            return 3
+
+        def args_dim(self):
+            return 0
+
+        def supports_scalar(self):
+            return False
+
+        def supports_jit(self):
+            return True
+
+        def supports_surface_queries(self):
+            return True
+
+        def supports_interaction_queries(self):
+            return False
+
+        def eval_color3(self, si, active=True):
             return mi.Color3f(si.wi.z)
 
         def eval_1(self, si, active=True):
@@ -69,7 +96,7 @@ def _ensure_registered():
         def to_string(self):
             return f'WiCosine[varying={self._varying}]'
 
-    mi.register_texture('test_wi_cosine', lambda props: WiCosine(props))
+    mi.register_field('test_wi_cosine', lambda props: WiCosine(props))
     _PLUGIN[variant] = WiCosine
 
 
