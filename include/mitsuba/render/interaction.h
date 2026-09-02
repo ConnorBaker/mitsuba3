@@ -99,13 +99,36 @@ MI_DECLARE_ENUM_OPERATORS(RayFlags)
  * when the bitwise AND of the two masks is nonzero.
  *
  * Mitsuba uses this mechanism to hide emitters from directly visible
- * (i.e., camera) rays. Integrators trace such rays with `RayMask.Camera`
- * and use `RayMask.All` everywhere else. The remaining bits are currently
- * unused.
+ * (i.e., camera) rays, and -- through the Blender-style ``visible_camera`` /
+ * ``visible_diffuse`` / ``visible_glossy`` / ``visible_transmission`` /
+ * ``visible_volume_scatter`` / ``visible_shadow`` shape properties -- to give
+ * every shape Blender's per-object "Ray Visibility" switches. Integrators
+ * trace each ray with the bit(s) describing the event that spawned it.
+ *
+ * The bit set mirrors Cycles' own (``intern/cycles/kernel/types.h``), and so
+ * does the matching rule: the test is a nonzero AND, so a ray carrying several
+ * bits (Cycles ORs ``TRANSMIT`` on top of ``DIFFUSE``/``GLOSSY``) is blocked
+ * only by a shape that hides ALL of them. `RayMask.All` is the default on both
+ * sides, under which every code path reduces exactly to the unmasked one.
  */
 enum class RayMask : uint32_t {
     /// Matched by all shapes except emitters marked as invisible
     Camera = 0x01,
+
+    /// Rays continuing after a diffuse scattering event
+    Diffuse = 0x02,
+
+    /// Rays continuing after a glossy/specular reflection
+    Glossy = 0x04,
+
+    /// Rays continuing after a transmission event
+    Transmission = 0x08,
+
+    /// Rays continuing after a scattering event inside a participating medium
+    VolumeScatter = 0x10,
+
+    /// Shadow rays, i.e. the occlusion test of next-event estimation
+    Shadow = 0x20,
 
     /// Default ray mask, matched by every shape
     All = 0xFF

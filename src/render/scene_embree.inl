@@ -127,8 +127,9 @@ embree_make_geometry(RTCDevice device, const Shape<Float, Spectrum> *shape,
 
     // Each case sets the per-shape visibility mask, which Embree tests
     // against the per-lane ray mask (this requires EMBREE_RAY_MASK).
-    // Instances keep the all-bits default, since Embree also tests the masks
-    // of the geometries within the instanced scene.
+    // Instances carry their own shape's mask (Blender's per-object switches
+    // convert to the instance); Embree additionally tests the masks of the
+    // geometries within the instanced scene.
     switch (g.kind) {
         case ShapeIR::Kind::Custom: {
             RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_USER);
@@ -185,6 +186,12 @@ embree_make_geometry(RTCDevice device, const Shape<Float, Spectrum> *shape,
             RTCGeometry inst = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_INSTANCE);
             rtcSetGeometryInstancedScene(inst, nested);
             rtcSetGeometryTimeStepCount(inst, 1);
+            /* Blender's per-object visibility switches live on the OBJECT, which
+               converts to this instance; the group's shared geometry ordinarily
+               carries the all-bits default. Embree ANDs the instance mask with
+               the ray mask and additionally tests the nested geometries' own
+               masks, so a mask on either level is honoured. */
+            rtcSetGeometryMask(inst, shape->visibility_mask());
             // Column-major 3x4 (g.to_world[col*3+row]) -> column-major 4x4.
             float M[16];
             for (int col = 0; col < 4; ++col) {

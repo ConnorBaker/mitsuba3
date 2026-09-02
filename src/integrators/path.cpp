@@ -214,13 +214,17 @@ public:
             Float prev_bsdf_pdf;
             Bool prev_bsdf_delta;
             Float min_ray_pdf;
+            /* Which RayMask switch this ray currently answers to. It has to be CARRIED
+               rather than recomputed each bounce, because a NULL interaction must not change
+               it -- see the note where it is updated. */
+            UInt32 ray_visibility;
             Bool active;
             Sampler* sampler;
 
             DRJIT_STRUCT(LoopState, ray, pi, throughput, result, eta, depth, \
                 null_depth, stop_next,
                 valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta, min_ray_pdf,
-                active, sampler)
+                ray_visibility, active, sampler)
         } ls = {
             ray,
             pi,
@@ -235,19 +239,21 @@ public:
             prev_bsdf_pdf,
             prev_bsdf_delta,
             min_ray_pdf,
+            UInt32((uint32_t) RayMask::Camera),
             active,
             sampler
         };
 
         // First bounce is usually coherent - don't reorder threads. The
-        // camera mask hides emitters marked as invisible.
+        // camera mask (ls.ray_visibility's initial value) hides emitters
+        // marked as invisible and shapes with `visible_camera = false`.
         ls.pi = scene->ray_intersect_preliminary(ls.ray,
                                                  /* coherent = */ true,
                                                  /* reorder = */ false,
                                                  /* reorder_hint = */ 0,
                                                  /* reorder_hint_bits = */ 0,
                                                  ls.active,
-                                                 +RayMask::Camera);
+                                                 ls.ray_visibility);
 
         dr::tie(ls) = dr::while_loop(dr::make_tuple(ls),
             [](const LoopState& ls) { return ls.active; },
@@ -279,9 +285,11 @@ public:
 
             // ---------------------- Direct emission ----------------------
 
-            // Ray mask of the trace that produced si to handle hidden emitters
-            UInt32 ray_mask = dr::select(ls.depth == 0u, +RayMask::Camera,
-                                         +RayMask::All);
+            /* Ray mask of the trace that produced si, to handle hidden emitters.
+               `ls.ray_visibility` is exactly that mask: it was Camera for the first
+               trace and is reassigned at the bottom of the loop before every other,
+               so no depth-based reconstruction is needed. */
+            UInt32 ray_mask = ls.ray_visibility;
 
             EmitterPtr emitter = si.emitter(scene, true, ray_mask);
             ls.valid_ray |= emitter != nullptr;
@@ -495,13 +503,23 @@ public:
 
             // -------------------- Stopping criterion ---------------------
 
-            /* Classify the lobe that was just sampled. A `null` interaction is a
-               pass-through, not a scattering event, which is the whole reason it gets its
-               own budget. (The fork ALSO derived per-lobe ray-visibility bits here; that
-               half is re-expressed on upstream's RayMask substrate in the visibility
-               cluster, P6.) */
-            Mask lobe_null  = has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
-            Mask at_surface = si.is_valid();
+            /* Classify the lobe that was just sampled. ONE classification, used by both the
+               bounce budgets and the ray-visibility continuation below -- but note that they
+               read it differently, and Cycles' `path_state_next` is explicit about the
+               difference:
+
+                 * the BOUNCE COUNTERS partition reflect-vs-transmit first, so the three are
+                   mutually exclusive and a diffuse TRANSMISSION is charged to transmission;
+                 * the RAY VISIBILITY bits are a UNION -- a transmission sets TRANSMIT *in
+                   addition to* DIFFUSE or GLOSSY, so a diffuse transmission ray carries two
+                   bits and is stopped by a shape that hides either one.
+
+               A `null` interaction is neither: it is a pass-through, not a scattering event,
+               which is the whole reason it gets its own budget. */
+            Mask lobe_null     = has_flag(bsdf_sample.sampled_type, BSDFFlags::Null);
+            Mask lobe_transmit = has_flag(bsdf_sample.sampled_type, BSDFFlags::Transmission);
+            Mask lobe_diffuse  = has_flag(bsdf_sample.sampled_type, BSDFFlags::Diffuse);
+            Mask at_surface    = si.is_valid();
 
             /* Charge the interaction to the right budget. Without a separate null budget the
                historical behaviour is reproduced exactly: everything lands on `depth`. */
@@ -544,13 +562,53 @@ public:
                 ls.stop_next |= charged_null &&
                                 ls.null_depth >= (uint32_t) m_transparent_max_depth;
 
+            /* Blender-style per-object ray visibility (\ref RayMask). Which switch the
+               continuation answers to is decided by the lobe that was just sampled, which
+               is Blender's own division: everything that is not diffuse -- including a
+               Delta specular lobe -- counts as glossy, and a transmission adds its bit ON
+               TOP rather than replacing it. Cycles' `path_state_next` ORs
+               `PATH_RAY_VISIBILITY_TRANSMIT` into a visibility that already carries
+               DIFFUSE or GLOSSY, so a diffuse transmission ray answers to BOTH switches
+               and is stopped by a shape that hides either. The type varies per lane, which
+               is why it is a `UInt32` rather than a constant. */
+            UInt32 scattered_type =
+                dr::select(lobe_diffuse, UInt32((uint32_t) RayMask::Diffuse),
+                           UInt32((uint32_t) RayMask::Glossy)) |
+                dr::select(lobe_transmit,
+                           UInt32((uint32_t) RayMask::Transmission), UInt32(0u));
+
+            /* A NULL interaction does NOT reclassify the ray. Cycles is explicit about
+               this in `path_state_next` (intern/cycles/kernel/integrator/path_state.h):
+
+                   ray through transparent keeps same flags from previous ray and is
+                   not counted as a regular bounce, transparent has separate max
+
+               -- it ORs in `PATH_RAY_TRANSPARENT` and returns early, never clearing
+               `PATH_RAY_CAMERA` and never setting DIFFUSE / GLOSSY / TRANSMIT. So a
+               camera ray that crosses a transparent surface is STILL a camera ray.
+
+               Recomputing the type from the sampled lobe made a null crossing turn a
+               camera ray into a transmission one, which un-hid every shape the camera is
+               not supposed to see as soon as anything transparent stood in front of it.
+               Measured in a closed grey box with one lamp behind a single Transparent
+               pane: Mitsuba's p99 and max were 15.99766 and 16.07686 -- exactly the
+               emitter's radiance -- against a Cycles image whose maximum anywhere was
+               0.30489, a 4.04x error in the mean. The same scene with the pane removed
+               was already correct at 1.0003, so the pane was the whole difference.
+
+               This is not a corner case for a Blender exporter: every area lamp is
+               exported as geometry wearing a `null` BSDF, and window glass is routinely
+               modelled the same way. */
+            ls.ray_visibility = dr::select(lobe_null, ls.ray_visibility, scattered_type);
+
             // Reorder threads based on the shape they hit
             ls.pi = scene->ray_intersect_preliminary(ls.ray,
                                                      /* coherent = */ false,
                                                      /* reorder = */ jit_flag(JitFlag::LoopRecord),
                                                      /* reorder_hint = */ 0,
                                                      /* reorder_hint_bits = */ 0,
-                                                     ls.active);
+                                                     ls.active,
+                                                     ls.ray_visibility);
         });
 
         return {
@@ -606,9 +664,10 @@ public:
      * `transparent_max_depth` -- the SAME budget the main path spends, which is Cycles'
      * `transparent_max_bounces`. A ray that exceeds it is treated as blocked.
      *
-     * The march currently traces with `RayMask::All`; once the visibility cluster (P6)
-     * adds a `Shadow` bit to upstream's `RayMask`, this is the one place on this path
-     * that must carry it, so that per-object shadow visibility keeps working.
+     * `RayMask::Shadow` is threaded through so that per-object shadow visibility keeps
+     * working (a shape with `visible_shadow = false` must not stop the march either);
+     * this is the one place it belongs on this path, and the acceleration structures do
+     * the filtering.
      *
      * Not run unless \ref Scene::has_null_bsdfs(), so a scene without a single pass-through
      * boundary keeps the one fast `ray_test` and pays nothing.
@@ -629,8 +688,12 @@ public:
             dr::make_tuple(ss),
             [](const ShadowState &ss) { return dr::detach(ss.active); },
             [this, scene, target](ShadowState &ss) {
+                /* The Shadow mask: a shape hidden from shadow rays must not stop the
+                   march either. Reduces to the unmasked query when no shape in the
+                   scene carries a mask (All & Shadow != 0 for every ordinary shape). */
                 PreliminaryIntersection3f pi = scene->ray_intersect_preliminary(
-                    ss.ray, /* coherent = */ false, ss.active);
+                    ss.ray, /* coherent = */ false, ss.active,
+                    UInt32((uint32_t) RayMask::Shadow));
                 SurfaceInteraction3f si = scene->compute_surface_interaction(
                     ss.ray, pi, +RayFlags::Default, ss.active);
 
