@@ -346,6 +346,12 @@ public:
             dr::masked(bs.sampled_type, sample_spec_reflect) =
                     +BSDFFlags::GlossyReflection;
 
+            /* Widening roughness for the ray differential (Cycles'
+               `bsdf_get_specular_roughness_squared`). The cosine-hemisphere lobes
+               below deliberately report nothing: a non-delta lobe that reports
+               nothing reads as fully rough, which is Cycles' own value for it. */
+            dr::masked(bs.sampled_roughness_squared, sample_spec_reflect) = ax * ay;
+
             // Filter the cases where macro and micro SURFACES do not agree
             // on the same side and the ray is not reflected.
             Mask reflect = Frame3f::cos_theta(wo) > 0.0f;
@@ -379,6 +385,8 @@ public:
             dr::masked(bs.sampled_component, sample_spec_trans) = 2;
             dr::masked(bs.sampled_type, sample_spec_trans) =
                     +BSDFFlags::GlossyTransmission;
+            dr::masked(bs.sampled_roughness_squared, sample_spec_trans) =
+                    ax_scaled * ay_scaled;
 
             // Filter the cases where macro and micro SURFACES do not agree
             // on the same side and the ray is not refracted.
