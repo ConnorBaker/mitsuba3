@@ -62,7 +62,7 @@ def _scene(flip, two_sided):
             'to_world': mi.ScalarTransform4f().translate([0, 1.5, 0])
                                               .rotate([1, 0, 0], 90).scale(0.5),
             'flip_normals': flip,
-            'emitter': {'type': 'area', 'radiance': 20.0, 'two_sided': two_sided},
+            'emitter': {'type': 'area', 'radiance': 20.0, 'twosided': two_sided},
         },
     })
 
@@ -100,7 +100,7 @@ def test03_two_sided_is_symmetric_under_flipping(variants_all_rgb):
 def test04_default_is_one_sided(variants_all_rgb):
     """Off by default: a scene written for Mitsuba keeps Mitsuba's semantics."""
     e = mi.load_dict({'type': 'area', 'radiance': 1.0})
-    assert 'two_sided = 0' in str(e) or 'two_sided = false' in str(e), str(e)
+    assert 'twosided = 0' in str(e) or 'twosided = false' in str(e), str(e)
 
 
 def test05_eval_is_relaxed_on_the_back_face(variants_all_rgb):
@@ -110,7 +110,7 @@ def test05_eval_is_relaxed_on_the_back_face(variants_all_rgb):
             'type': 'scene',
             'lamp': {'type': 'rectangle',
                      'emitter': {'type': 'area', 'radiance': 1.0,
-                                 'two_sided': two_sided}},
+                                 'twosided': two_sided}},
         })
         emitter = scene.shapes()[0].emitter()
         si = dr.zeros(mi.SurfaceInteraction3f)
@@ -132,7 +132,7 @@ def test06_sampled_power_doubles(variants_all_rgb):
             'type': 'scene',
             'lamp': {'type': 'rectangle',
                      'emitter': {'type': 'area', 'radiance': 1.0,
-                                 'two_sided': two_sided}},
+                                 'twosided': two_sided}},
         })
         emitter = scene.shapes()[0].emitter()
         n = 4096
