@@ -150,7 +150,7 @@ def test03_piece3_reaches_glossy_and_only_glossy():
     ctx = mi.BSDFContext()
     tilt = [0.9, 0.5, 0.8]
 
-    ident = lambda self, si, frame, wiz0, attr: frame
+    ident = lambda self, si, frame, wiz0, attr, use_rot=True: frame
 
     # diffuse-only: identity-forced and real must agree exactly.
     # Patch `type(<instance>)`, not a module-path class -- the bsdfs package
@@ -217,3 +217,43 @@ def test04_backface_sample_pdf_agrees_and_the_control_fails():
                      dr.abs(bs2.pdf - pq2) / dr.maximum(bs2.pdf, 1e-9), 0.0)
     assert dr.max(rel2)[0] > 1e-3, (
         "negative control failed -- the MIS check cannot see the wiz0 bug it guards")
+
+
+def test05_piece3_reaches_the_coat():
+    """Cycles corrects the COAT with its own copy of the fix (`svm/closure.h`:
+    `valid_coat_normal = maybe_ensure_valid_specular_reflection(sd, coat_normal)`), used
+    for the coat closure AND the tint's optical depth. The port did not, for a while --
+    the coat frame went uncorrected while the base glossy frame was fixed -- and test03
+    could not see that, because its probes carry no coat. Same design as test03 on a
+    coat-only configuration: the base is pure diffuse (test03 proves piece 3 is a no-op
+    there), so any identity-forced difference is the coat's.
+    """
+    mi.set_variant(_variant())
+    from mitsuba.python.ad.bsdfs.common import compute_normalmap_frame
+
+    tilt = [0.9, 0.5, 0.8]                              # coat normal (0.8, 0, 0.6)
+    si = _make_si((-0.995, 0.0, 0.0999))                # grazing against the tilt
+    wo = dr.normalize(mi.Vector3f(0.4, 0.2, 0.9))
+    ctx = mi.BSDFContext()
+
+    coat = _bsdf(metallic=0.0, spec_ior_level=0.0, roughness=0.9,
+                 clearcoat=1.0, clearcoat_roughness=0.3,
+                 clearcoat_normalmap={"type": "rgb", "value": tilt})
+
+    # VACUITY: the correction must actually fire on the COAT frame here.
+    attr = coat.fetch_attributes(si, mi.Bool(True))
+    cc_frame = compute_normalmap_frame(si, normal=attr.clearcoat_normal)
+    g = coat._valid_reflection_frame(si, cc_frame, mi.Float(si.wi.z), attr,
+                                     use_rot=False)
+    assert abs(g.n.x[0] - cc_frame.n.x[0]) > 1e-3, "probe does not fire on the coat"
+
+    # REACH: identity-forced vs real must differ -- the corrected coat frame is wired
+    # into eval. Patch type(<instance>), per test03/test04's double-import story.
+    ident = lambda self, si, frame, wiz0, attr, use_rot=True: frame
+    cls = type(coat)
+    orig = cls._valid_reflection_frame
+    v1, p1 = coat.eval_pdf(ctx, si, wo)
+    cls._valid_reflection_frame = ident
+    v0, p0 = coat.eval_pdf(ctx, si, wo)
+    cls._valid_reflection_frame = orig
+    assert dr.max(dr.abs(v1 - v0))[0] > 1e-4, "coat never sees the corrected frame"

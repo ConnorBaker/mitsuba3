@@ -599,7 +599,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         return weights, sampling_weights, masks
 
-    def _valid_reflection_frame(self, si, frame, wiz0, attr):
+    def _valid_reflection_frame(self, si, frame, wiz0, attr, use_rot=True):
         """Cycles' `maybe_ensure_valid_specular_reflection` (`kernel/closure/bsdf_util.h`),
         as a FRAME for the glossy lobes -- piece 3 of the bump-map correction.
 
@@ -668,7 +668,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # Rebuild the frame exactly as `compute_normalmap_frame` does, tangent included,
         # so the anisotropic rotation survives the correction.
         dp_du = mi.Vector3f(si.dp_du)
-        if attr.anisotropic_rot is not None:
+        if use_rot and attr.anisotropic_rot is not None:
             dp_du = mi.Transform4f().rotate(si.n, attr.anisotropic_rot * 360.0) @ dp_du
         dp_du = si.to_local(dp_du)
         g_frame = mi.Frame3f()
@@ -812,8 +812,16 @@ class BlenderPrincipledBSDF(mi.BSDF):
         wo_g = g_frame.to_local(wo_)
         wh_g = half_vector(wi_g, wo_g, glass_eta)
 
-        # Apply normalmap for clearcoat lobe
+        # Apply normalmap for clearcoat lobe. Cycles gives the coat its OWN copy of the
+        # ensure-valid correction (`svm/closure.h`: `valid_coat_normal =
+        # maybe_ensure_valid_specular_reflection(sd, coat_normal)`) and uses it both for
+        # the coat closure and for the tint's optical depth (`cosNI = dot(sd->wi,
+        # valid_coat_normal)`), so the corrected frame feeds everything downstream of
+        # `cc_wi`. The coat is isotropic (`bsdf->T = zero_float3()`), hence use_rot=False.
         cc_frame = compute_normalmap_frame(si, normal=attr.clearcoat_normal)
+        if self.bump_map_correction and self.has_clearcoat:
+            cc_frame = self._valid_reflection_frame(si, cc_frame, wiz0, attr,
+                                                    use_rot=False)
         cc_wi = cc_frame.to_local(si.wi)
 
         # Compute lobe weights and sample weights
@@ -1074,8 +1082,12 @@ class BlenderPrincipledBSDF(mi.BSDF):
             wi_g, sample2, attr.roughness, attr.anisotropic, min_alpha=attr.min_alpha
         )
 
-        # Apply normalmap for clearcoat lobe
+        # Apply normalmap for clearcoat lobe -- corrected exactly as in eval; sample and
+        # eval must share the coat frame or the pdf stops describing the distribution.
         cc_frame = compute_normalmap_frame(si, normal=attr.clearcoat_normal)
+        if self.bump_map_correction and self.has_clearcoat:
+            cc_frame = self._valid_reflection_frame(si, cc_frame, null_wi.z, attr,
+                                                    use_rot=False)
         cc_wi = cc_frame.to_local(si.wi)
 
         # Compute lobe weights and sample weights
