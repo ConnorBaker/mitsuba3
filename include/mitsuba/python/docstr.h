@@ -4155,9 +4155,7 @@ static const char *__doc_mitsuba_Field_supports_scalar = R"doc(Return whether th
 
 static const char *__doc_mitsuba_Field_supports_surface_queries = R"doc(Return whether this field supports `SurfaceInteraction3f` queries)doc";
 
-static const char *__doc_mitsuba_Field_traverse_1_cb_ro = R"doc()doc";
-
-static const char *__doc_mitsuba_Field_traverse_1_cb_rw = R"doc()doc";
+static const char *__doc_mitsuba_Field_traverse_cb = R"doc()doc";
 
 static const char *__doc_mitsuba_Field_type = R"doc()doc";
 
@@ -6193,11 +6191,11 @@ static const char *__doc_mitsuba_Mesh_Part_id = R"doc(Label of the part, e.g. th
 static const char *__doc_mitsuba_Mesh_Part_label =
 R"doc(Name that the source mesh carries itself
 
-This names the mesh independently of the scene it appears in: the label
-that a :monosp:`serialized` file stores next to the geometry, or the
-file name for formats that store no name of their own. The ``id`` field
-instead holds the name that the Mitsuba scene knows the shape by, and
-the two differ whenever the scene assigns an id.)doc";
+This names the mesh independently of the scene it appears in: the
+label that a :monosp:`serialized` file stores next to the geometry,
+or the file name for formats that store no name of their own. The
+``id`` field instead holds the name that the Mitsuba scene knows
+the shape by, and the two differ whenever the scene assigns an id.)doc";
 
 static const char *__doc_mitsuba_Mesh_add_attribute =
 R"doc(Add the mesh attribute ``name``
@@ -6470,7 +6468,9 @@ static const char *__doc_mitsuba_Mesh_is_vertex_attribute = R"doc(Does the attri
 
 static const char *__doc_mitsuba_Mesh_m_area_pmf = R"doc()doc";
 
-static const char *__doc_mitsuba_Mesh_m_bbox = R"doc(Bounding box of the mesh positions)doc";
+static const char *__doc_mitsuba_Mesh_m_bbox = R"doc(Bounding box of the mesh positions, computed on demand by `bbox()`)doc";
+
+static const char *__doc_mitsuba_Mesh_m_bbox_valid = R"doc(Does `m_bbox` reflect the current positions?)doc";
 
 static const char *__doc_mitsuba_Mesh_m_bsdf_index = R"doc()doc";
 
@@ -6608,7 +6608,10 @@ packed buffers in a single pass, and ends in ``refresh()``.
 
 The ``flip_normals`` flag turns the surface inside out as the records
 are written, which `from_fields()` uses to bake the property of
-the same name. See ``validate_impl()`` for ``updating``.)doc";
+the same name. See ``validate_impl()`` for ``updating``.
+
+The caller can provide a bounding box (if known), in which case
+the implementation does not need to recompute it.)doc";
 
 static const char *__doc_mitsuba_Mesh_packed_face = R"doc(Returns the packed face record of triangle ``index``)doc";
 
@@ -6675,7 +6678,7 @@ static const char *__doc_mitsuba_Mesh_ray_intersect_triangle_packet_3 = R"doc()d
 
 static const char *__doc_mitsuba_Mesh_ray_intersect_triangle_scalar = R"doc()doc";
 
-static const char *__doc_mitsuba_Mesh_recompute_bbox = R"doc((Re-)compute the bounding box from the packed positions)doc";
+static const char *__doc_mitsuba_Mesh_recompute_bbox = R"doc((Re-)compute the bounding box from the packed positions.)doc";
 
 static const char *__doc_mitsuba_Mesh_recompute_normals = R"doc((Re-) compute smooth interpolated normals from the positions)doc";
 
@@ -11763,9 +11766,7 @@ static const char *__doc_mitsuba_SurfaceField_supports_scalar = R"doc()doc";
 
 static const char *__doc_mitsuba_SurfaceField_supports_surface_queries = R"doc()doc";
 
-static const char *__doc_mitsuba_SurfaceField_traverse_1_cb_ro = R"doc()doc";
-
-static const char *__doc_mitsuba_SurfaceField_traverse_1_cb_rw = R"doc()doc";
+static const char *__doc_mitsuba_SurfaceField_traverse_cb = R"doc()doc";
 
 static const char *__doc_mitsuba_SurfaceField_type = R"doc()doc";
 
@@ -12636,10 +12637,8 @@ R"doc(Extend the lifetime of a Python object whose contents were
 reported to `put()`
 
 A plugin written in Python can report a value that exists only for the
-duration of the call, which the bindings have no way of detecting. They
-therefore offer the underlying Python object here, and a callback that
-holds on to reported pointers should reference it. The argument is a
-borrowed `PyObject *`.)doc";
+duration of the call. It must invoke this funcdtion with the borrowed
+``PyObject*`` so that the caller can keep it alive.)doc";
 
 static const char *__doc_mitsuba_TraversalCallback_put = R"doc(Register a mirrored ``synced<...>`` value as a traversable parameter)doc";
 
@@ -12799,21 +12798,13 @@ static const char *__doc_mitsuba_VolumeField_supports_surface_queries = R"doc()d
 
 static const char *__doc_mitsuba_VolumeField_to_string = R"doc(Returns a human-readable summary.)doc";
 
-static const char *__doc_mitsuba_VolumeField_traverse_1_cb_ro = R"doc()doc";
-
-static const char *__doc_mitsuba_VolumeField_traverse_1_cb_rw = R"doc()doc";
+static const char *__doc_mitsuba_VolumeField_traverse_cb = R"doc()doc";
 
 static const char *__doc_mitsuba_VolumeField_type = R"doc()doc";
 
 static const char *__doc_mitsuba_VolumeField_update_bbox = R"doc()doc";
 
 static const char *__doc_mitsuba_VolumeField_variant_name = R"doc()doc";
-
-static const char *__doc_mitsuba_Volume_5 = R"doc()doc";
-
-static const char *__doc_mitsuba_Volume_6 = R"doc()doc";
-
-static const char *__doc_mitsuba_Volume_7 = R"doc()doc";
 
 static const char *__doc_mitsuba_VolumeGrid =
 R"doc(Class to read and write 3D volume grids
