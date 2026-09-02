@@ -132,8 +132,14 @@ def set_variant(*args: str) -> None:
         # AD integrators and loaders subclass variant-specific types and must
         # be re-imported whenever a JIT variant becomes active
         if _variant.startswith(('llvm_', 'cuda_', 'metal_')):
+            # The Blender-node plugin packages are reloaded by SUBMODULE
+            # rather than through their `mitsuba.python.plugins` parent, whose
+            # __init__ is a bare `from .textures import *` -- reloading the
+            # parent would re-bind names without re-executing the child, so
+            # nothing would re-register.
             for module_name in ('mitsuba.python.ad.integrators',
-                                'mitsuba.python.ad.loaders'):
+                                'mitsuba.python.ad.loaders',
+                                'mitsuba.python.plugins.textures'):
                 _importlib.reload(_importlib.import_module(module_name))
 
         # Built-in Python plugins must be ready before user callbacks observe
