@@ -140,7 +140,8 @@ def set_variant(*args: str) -> None:
             for module_name in ('mitsuba.python.ad.integrators',
                                 'mitsuba.python.ad.loaders',
                                 'mitsuba.python.ad.bsdfs',
-                                'mitsuba.python.plugins.textures'):
+                                'mitsuba.python.plugins.textures',
+                                'mitsuba.python.plugins.emitters'):
                 _importlib.reload(_importlib.import_module(module_name))
 
         # Built-in Python plugins must be ready before user callbacks observe
