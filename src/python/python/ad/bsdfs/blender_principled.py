@@ -647,6 +647,84 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         return weights, sampling_weights, masks
 
+    def _valid_reflection_frame(self, si, frame, wiz0, attr):
+        """Cycles' `maybe_ensure_valid_specular_reflection` (`kernel/closure/bsdf_util.h`),
+        as a FRAME for the glossy lobes -- piece 3 of the bump-map correction.
+
+        If the closure normal would specularly reflect the view ray into the lower
+        hemisphere of the GEOMETRIC surface, rotate it toward the geometric normal just
+        far enough that the reflection clears a threshold (`min(0.9*dot(Ng,I), 0.01)`).
+        Cycles applies the corrected normal to the metallic, specular and transmission
+        microfacet closures ONLY -- the diffuse-range closures keep the uncorrected one
+        (`svm/closure.h`: `bsdf->N = valid_reflection_N` on those three, plain `N` on
+        Oren-Nayar) -- and the caller here mirrors that split. Wiring the whole frame
+        through the existing `compute_frame(..., correction=True)` helper would move the
+        diffuse lobe too, which is a different model; that is why this is per-lobe.
+
+        FRAME BOOKKEEPING, which is where a faithful transcription can silently break:
+        everything here lives in `si`'s local frame, where the SMOOTH shading normal is
+        (0,0,1) and the geometric normal is `si.to_local(si.n)` -- NOT (0,0,1) on a
+        smooth-shaded mesh, which is exactly why the correction also fires without any
+        normal map, as it does in Cycles (`isequal(sd->Ng, N)` compares against the
+        GEOMETRIC normal). Two conventions have to be reconciled:
+
+        * the two-sided path mirrors `si.wi.z` about the tangent plane instead of
+          flipping the frame, so the geometric normal must be mirrored the same way --
+          `wiz0` carries the PRE-mirror sign of `si.wi.z` for that;
+        * Cycles' `shader_setup_from_ray` flips `sd->Ng` onto the incident side of a
+          backfacing hit (the `kernel_assert(Iz >= 0)` invariant). Flipping our mirrored
+          `ng` to the hemisphere of the view direction reproduces that invariant for the
+          one-sided interior-hit case (glass) as well.
+
+        The quartic solve is the kernel's, term for term; the only additions are the
+        `dr.maximum(..., eps)` guards on the two divisions, which Cycles leaves bare
+        because its scalar path never evaluates the masked-out lanes.
+        """
+        n = mi.Vector3f(frame.n)
+
+        ng = si.to_local(mi.Vector3f(si.n))
+        # Mirror into the same reflected local space the two-sided handling put `si.wi`
+        # in (the mirror negates z only), then flip onto the incident side -- Cycles'
+        # backfacing flip of `sd->Ng`.
+        ng.z[attr.two_sided] = dr.mulsign(ng.z, wiz0)
+        wi = si.wi
+        ng = dr.mulsign(ng, dr.dot(ng, wi))
+
+        r = 2.0 * dr.dot(n, wi) * n - wi
+        iz = dr.dot(wi, ng)
+        threshold = dr.minimum(0.9 * iz, 0.01)
+        need = dr.dot(ng, r) < threshold
+
+        # X: the component of N orthogonal to Ng, with N itself as the degenerate
+        # fallback (`safe_normalize_fallback`).
+        x_raw = n - dr.dot(n, ng) * ng
+        x_len2 = dr.squared_norm(x_raw)
+        x = dr.select(x_len2 > 0.0, x_raw * dr.rsqrt(dr.maximum(x_len2, 1e-30)), n)
+
+        ix = dr.dot(wi, x)
+        a = dr.maximum(dr.square(ix) + dr.square(iz), 1e-20)
+        b = 2.0 * (a + iz * threshold)
+        c = dr.square(threshold + iz)
+        disc = dr.safe_sqrt(dr.square(b) - 4.0 * a * c)
+        nz2 = dr.select(ix < 0.0, 0.25 * (b + disc) / a, 0.25 * (b - disc) / a)
+        nx = dr.safe_sqrt(1.0 - nz2)
+        nz = dr.safe_sqrt(nz2)
+        n_new = nx * x + nz * ng
+
+        n_out = dr.normalize(dr.select(need, n_new, n))
+
+        # Rebuild the frame exactly as `compute_normalmap_frame` does, tangent included,
+        # so the anisotropic rotation survives the correction.
+        dp_du = mi.Vector3f(si.dp_du)
+        if attr.anisotropic_rot is not None:
+            dp_du = mi.Transform4f().rotate(si.n, attr.anisotropic_rot * 360.0) @ dp_du
+        dp_du = si.to_local(dp_du)
+        g_frame = mi.Frame3f()
+        g_frame.n = n_out
+        g_frame.s = dr.normalize(-n_out * dr.dot(n_out, dp_du) + dp_du)
+        g_frame.t = dr.cross(g_frame.n, g_frame.s)
+        return g_frame
+
     def _bump_shadowing(self, si, frame, wo, is_eval):
         """Cycles' `bump_shadowing_term` (`kernel/closure/bsdf.h`).
 
@@ -735,10 +813,18 @@ class BlenderPrincipledBSDF(mi.BSDF):
         soft = dr.select(cos_i < 1e-6, mi.Float(0.0), soft)
         return keep, soft
 
-    def _eval_pdf_impl(self, attr, ctx, si, wo_, active, is_eval=True):
+    def _eval_pdf_impl(self, attr, ctx, si, wo_, active, is_eval=True, wiz0=None):
         # Two-sided
         wo_ = mi.Vector3f(wo_)
         si = mi.SurfaceInteraction3f(si)
+        # `wiz0` is the PRE-mirror sign of `si.wi.z`, which the geometric normal below
+        # needs. An integrator's eval/pdf call passes an unmirrored `si`, so it is
+        # captured here; `_sample_impl` calls in with an `si` whose `wi.z` was ALREADY
+        # abs'd, so it must pass its own pre-flip copy -- otherwise a two-sided
+        # back-face sample's `bs.pdf` is computed in a differently-mirrored glossy
+        # frame than the integrator's `pdf()` query for the same direction (MIS bias).
+        if wiz0 is None:
+            wiz0 = mi.Float(si.wi.z)
         wo_.z[attr.two_sided] = dr.mulsign(wo_.z, si.wi.z)
         si.wi.z[attr.two_sided] = dr.abs(si.wi.z)
 
@@ -749,6 +835,17 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         # Compute half vector
         wh = half_vector(wi, wo, attr.eta)
+
+        # Cycles' bump-map correction, piece 3: the GLOSSY lobes see a closure normal
+        # raised so the specular reflection clears the geometric surface; the
+        # diffuse-range lobes keep the uncorrected frame. See `_valid_reflection_frame`.
+        if self.bump_map_correction:
+            g_frame = self._valid_reflection_frame(si, frame, wiz0, attr)
+        else:
+            g_frame = frame
+        wi_g = g_frame.to_local(si.wi)
+        wo_g = g_frame.to_local(wo_)
+        wh_g = half_vector(wi_g, wo_g, attr.eta)
 
         # Apply normalmap for clearcoat lobe
         cc_frame = compute_normalmap_frame(si, normal=attr.clearcoat_normal)
@@ -764,6 +861,10 @@ class BlenderPrincipledBSDF(mi.BSDF):
         refract_geom = is_refraction(si.wi, wo_)
         reflect_shading = is_reflection(wi, wo)
         refract_shading = is_refraction(wi, wo)
+        # The glossy lobes test their OWN (corrected) closure normal, exactly as Cycles'
+        # `bsdf_microfacet_eval` tests `sc->N` after `bsdf->N = valid_reflection_N`.
+        reflect_shading_g = is_reflection(wi_g, wo_g)
+        refract_shading_g = is_refraction(wi_g, wo_g)
 
         # THE DIFFUSE-RANGE LOBES TEST ONLY THE OUTGOING DIRECTION against the closure
         # normal. Cycles' `bsdf_diffuse_eval` and `bsdf_sheen_eval` both declare their
@@ -807,13 +908,15 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # hit, which Cycles rejects outright.
         incoming_above_shading = (mi.Frame3f.cos_theta(wi)
                                   * mi.Frame3f.cos_theta(si.wi)) > 0.0
+        incoming_above_shading_g = (mi.Frame3f.cos_theta(wi_g)
+                                    * mi.Frame3f.cos_theta(si.wi)) > 0.0
         masks.diffuse &= reflect_geom & outgoing_above_shading
         masks.clearcoat &= reflect_geom & reflect_shading & incoming_above_shading
         masks.sheen &= reflect_geom & outgoing_above_shading
-        masks.metallic &= reflect_geom & reflect_shading & incoming_above_shading
-        masks.specular &= reflect_geom & reflect_shading & incoming_above_shading
-        masks.trans_reflect &= reflect_geom & reflect_shading & incoming_above_shading
-        masks.trans_refract &= refract_geom & refract_shading & incoming_above_shading
+        masks.metallic &= reflect_geom & reflect_shading_g & incoming_above_shading_g
+        masks.specular &= reflect_geom & reflect_shading_g & incoming_above_shading_g
+        masks.trans_reflect &= reflect_geom & reflect_shading_g & incoming_above_shading_g
+        masks.trans_refract &= refract_geom & refract_shading_g & incoming_above_shading_g
 
         # Cycles' bump-map correction. `bump_keep` rejects light leaking through the
         # smoothed geometry; `bump_soft` is the GGX shadowing factor, which Cycles applies
@@ -823,12 +926,15 @@ class BlenderPrincipledBSDF(mi.BSDF):
         masks.sheen &= bump_keep
         if is_eval:
             # On eval the rejection covers every closure; when sampling it does not, so a
-            # sampled specular direction survives.
+            # sampled specular direction survives. The glossy lobes' rejection tests
+            # THEIR closure normal -- `bump_shadowing_term(sd, sc, ...)` reads `sc->N`,
+            # which piece 3 just corrected -- so it comes from the corrected frame.
+            bump_keep_g, _ = self._bump_shadowing(si, g_frame, wo_, is_eval)
             masks.clearcoat &= bump_keep
-            masks.metallic &= bump_keep
-            masks.specular &= bump_keep
-            masks.trans_reflect &= bump_keep
-            masks.trans_refract &= bump_keep
+            masks.metallic &= bump_keep_g
+            masks.specular &= bump_keep_g
+            masks.trans_reflect &= bump_keep_g
+            masks.trans_refract &= bump_keep_g
 
         # Initializing the output PDF and BSDF values
         pdf = mi.Float(0.0)
@@ -863,8 +969,8 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # Metallic component based on Schlick
         if self.has_metallic:
             metal_value, metal_pdf = MicrofacetLobe.eval_pdf(
-                wi,
-                wo,
+                wi_g,
+                wo_g,
                 reflection=True,
                 roughness=attr.roughness,
                 min_alpha=attr.min_alpha,
@@ -883,8 +989,8 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # Glass lobe
         if self.has_transmission:
             reflect_value, reflect_pdf = MicrofacetLobe.eval_pdf(
-                wi,
-                wo,
+                wi_g,
+                wo_g,
                 reflection=True,
                 roughness=attr.roughness,
                 min_alpha=attr.min_alpha,
@@ -900,8 +1006,8 @@ class BlenderPrincipledBSDF(mi.BSDF):
             pdf[masks.trans_reflect] += sampling_weights.trans_reflect * reflect_pdf
 
             refract_value, refract_pdf = MicrofacetLobe.eval_pdf(
-                wi,
-                wo,
+                wi_g,
+                wo_g,
                 reflection=False,
                 roughness=attr.roughness,
                 min_alpha=attr.min_alpha,
@@ -926,8 +1032,8 @@ class BlenderPrincipledBSDF(mi.BSDF):
             spec_r0 *= attr.spec_tint
 
             spec_value, spec_pdf = MicrofacetLobe.eval_pdf(
-                wi,
-                wo,
+                wi_g,
+                wo_g,
                 reflection=True,
                 roughness=attr.roughness,
                 min_alpha=attr.min_alpha,
@@ -975,9 +1081,25 @@ class BlenderPrincipledBSDF(mi.BSDF):
         frame = compute_normalmap_frame(si, attr.normal, rot=attr.anisotropic_rot)
         wi = frame.to_local(si.wi)
 
-        # Sample main specular and transmission reflection distribution
+        # Piece 3 of the bump-map correction: the glossy lobes sample in the CORRECTED
+        # frame, the same one `_eval_pdf_impl` evaluates them in -- eval and sample must
+        # share a frame or the returned pdf stops describing the sampling distribution.
+        # `null_wi` is the pre-mirror copy, so its z carries the sign the geometric
+        # normal needs. See `_valid_reflection_frame`.
+        if self.bump_map_correction:
+            g_frame = self._valid_reflection_frame(si, frame, null_wi.z, attr)
+        else:
+            g_frame = frame
+        wi_g = g_frame.to_local(si.wi)
+
+        # Sample main specular and transmission reflection distribution. `wh` (base
+        # frame, from the uncorrected `wi`) feeds `_lobe_weights` exactly as eval's
+        # half-vector `wh` does; `wh_g` builds the actual sampled directions.
         wh = MicrofacetLobe.sample_wh(
             wi, sample2, attr.roughness, attr.anisotropic, min_alpha=attr.min_alpha
+        )
+        wh_g = MicrofacetLobe.sample_wh(
+            wi_g, sample2, attr.roughness, attr.anisotropic, min_alpha=attr.min_alpha
         )
 
         # Apply normalmap for clearcoat lobe
@@ -1032,7 +1154,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # Reflection
         if self.has_specular:
             b = dr.zeros(mi.BSDFSample3f)
-            b.wo = frame.to_world(microfacet_reflect(wi, wh))
+            b.wo = g_frame.to_world(microfacet_reflect(wi_g, wh_g))
             b.sampled_component = self.components_mapping.specular
             b.sampled_type = +mi.BSDFFlags.GlossyReflection
             b.eta = 1.0
@@ -1043,7 +1165,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
         if self.has_transmission:
             # Reflection
             b = dr.zeros(mi.BSDFSample3f)
-            b.wo = frame.to_world(microfacet_reflect(wi, wh))
+            b.wo = g_frame.to_world(microfacet_reflect(wi_g, wh_g))
             b.sampled_component = self.components_mapping.trans_reflect
             b.sampled_type = +mi.BSDFFlags.GlossyReflection
             b.eta = 1.0
@@ -1051,10 +1173,10 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
             # Refraction
             b = dr.zeros(mi.BSDFSample3f)
-            b.wo = frame.to_world(microfacet_refract(wi, wh, attr.eta))
+            b.wo = g_frame.to_world(microfacet_refract(wi_g, wh_g, attr.eta))
             b.sampled_component = self.components_mapping.trans_refract
             b.sampled_type = +mi.BSDFFlags.GlossyTransmission
-            b.eta = dr.select(is_front_side(wi), attr.eta, dr.rcp(attr.eta))
+            b.eta = dr.select(is_front_side(wi_g), attr.eta, dr.rcp(attr.eta))
             bs[masks.trans_refract & is_refraction(si.wi, b.wo)] = b
 
         if self.has_alpha:
@@ -1069,7 +1191,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # `is_eval=False`: Cycles does not reject a SAMPLED non-diffuse direction,
         # only an evaluated one (`bsdf_sample` passes `false`).
         value, bs.pdf = self._eval_pdf_impl(attr, ctx, si, bs.wo, active,
-                                            is_eval=False)
+                                            is_eval=False, wiz0=null_wi.z)
 
         if self.has_alpha:
             value[masks.null] = 1.0 - attr.alpha
