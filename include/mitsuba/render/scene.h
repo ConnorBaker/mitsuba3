@@ -782,6 +782,23 @@ public:
      */
     bool shapes_grad_enabled() const { return m_shapes_grad_enabled; };
 
+    /**
+     * \brief Does any shape in the scene carry a BSDF with a ``Null`` lobe?
+     *
+     * A ``null`` boundary -- Blender's Transparent BSDF, and the pass-through half of
+     * ``mask`` -- is invisible to a *scattering* path, but \ref ray_test() is a pure
+     * occlusion query and reports it as a hit like any other. An integrator that tests
+     * shadow-ray visibility with \ref ray_test() therefore treats a pane of clear glass
+     * as a wall: next-event estimation dies behind it, and -- worse than merely dark --
+     * the BSDF-sampled hit on that same emitter is still MIS-weighted as though NEE had
+     * contributed its half, so the result is biased LOW rather than only noisier.
+     *
+     * Integrators use this to decide whether the shadow ray must be MARCHED through null
+     * boundaries instead. It is \c false for the overwhelming majority of scenes, which
+     * therefore keep the single fast \ref ray_test() and pay nothing for the feature.
+     */
+    bool has_null_bsdfs() const { return m_has_null_bsdfs; }
+
     /// Returns a union of ShapeType flags denoting what is present in the scene
     uint32_t shape_types() const;
 
@@ -849,6 +866,8 @@ protected:
     std::unique_ptr<DiscreteDistribution<Float>> m_silhouette_distr = nullptr;
 
     bool m_shapes_grad_enabled;
+    /// \see has_null_bsdfs()
+    bool m_has_null_bsdfs = false;
     bool m_thread_reordering;
     /// Compact GPU acceleration structures after building. This reduces BLAS
     /// memory at the cost of an extra build-time query and compaction pass.

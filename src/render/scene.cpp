@@ -143,6 +143,22 @@ MI_VARIANT Scene<Float, Spectrum>::Scene(const Properties &props)
     update_emitter_sampling_distribution();
     update_silhouette_sampling_distribution();
 
+    /* Cache whether ANY shape carries a Null lobe (\ref has_null_bsdfs()), so that
+       integrators can skip the null-aware shadow march entirely on the overwhelming
+       majority of scenes. Instanced geometry counts too: the path meets the group's
+       shapes through the instance, so a pane inside a shapegroup blocks (or passes)
+       shadow rays exactly like a top-level one. */
+    auto shape_has_null = [](const Shape *shape) {
+        const BSDF *bsdf = shape->bsdf();
+        return bsdf != nullptr && has_flag(bsdf->flags(), BSDFFlags::Null);
+    };
+    m_has_null_bsdfs = false;
+    for (const Shape *shape : m_shapes)
+        m_has_null_bsdfs |= shape_has_null(shape);
+    for (const auto &group : m_shapegroups)
+        for (const auto &shape : group->shapes())
+            m_has_null_bsdfs |= shape_has_null(shape.get());
+
     m_shapes_grad_enabled = false;
 }
 
