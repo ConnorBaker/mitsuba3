@@ -52,6 +52,11 @@ MI_PY_EXPORT(SurfaceInteraction) {
         .def_field(SurfaceInteraction3f, wi,            D(SurfaceInteraction, wi))
         .def_field(SurfaceInteraction3f, prim_index,    D(SurfaceInteraction, prim_index))
         .def_field(SurfaceInteraction3f, instance_index, D(SurfaceInteraction, instance_index))
+        // Literal rather than `D(...)`: the docstring symbols in `docstr.h` are generated
+        // by mkdoc from the headers, and a freshly added field has no entry there yet.
+        .def_field(SurfaceInteraction3f, min_alpha,
+                   "Lower bound on microfacet roughness imposed by the path so far "
+                   "(Cycles' filter glossy). Zero disables it.")
 
         // Methods
         .def(nb::init<>(), D(SurfaceInteraction, SurfaceInteraction))
@@ -94,7 +99,8 @@ MI_PY_EXPORT(SurfaceInteraction) {
 
     MI_PY_DRJIT_STRUCT(si, SurfaceInteraction3f, t, time, wavelengths, p, n,
                        shape, uv, sh_frame, frame_flipped, dp_du, dp_dv, dn_du,
-                       dn_dv, duv_dx, duv_dy, wi, prim_index, instance_index)
+                       dn_dv, duv_dx, duv_dy, wi, prim_index, instance_index,
+                       min_alpha)
 }
 
 MI_PY_EXPORT(MediumInteraction) {

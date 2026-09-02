@@ -268,8 +268,8 @@ public:
 
         // Construct the microfacet distribution matching the roughness values at the current surface position.
         MicrofacetDistribution distr(m_type,
-                                     m_alpha_u->eval_1(si, active),
-                                     m_alpha_v->eval_1(si, active),
+                                     filter_glossy_alpha(m_alpha_u->eval_1(si, active), si),
+                                     filter_glossy_alpha(m_alpha_v->eval_1(si, active), si),
                                      m_sample_visible);
 
         // Trick by Walter et al.: slightly scale the roughness values to
@@ -320,6 +320,12 @@ public:
         bs.sampled_type      = dr::select(selected_r,
                                       UInt32(+BSDFFlags::GlossyReflection),
                                       UInt32(+BSDFFlags::GlossyTransmission));
+
+        /* Report the lobe's squared roughness so an integrator can widen the ray
+           differential after this bounce (Cycles'
+           `bsdf_get_specular_roughness_squared` -> `bsdf_widen_dD`). Without it a
+           texture footprint is meaningless past the camera hit. */
+        bs.sampled_roughness_squared = distr.alpha_u() * distr.alpha_v();
 
         Float dwh_dwo = 0.f;
 
@@ -395,8 +401,8 @@ public:
         // Construct the microfacet distribution matching the
         // roughness values at the current surface position.
         MicrofacetDistribution distr(m_type,
-                                     m_alpha_u->eval_1(si, active),
-                                     m_alpha_v->eval_1(si, active),
+                                     filter_glossy_alpha(m_alpha_u->eval_1(si, active), si),
+                                     filter_glossy_alpha(m_alpha_v->eval_1(si, active), si),
                                      m_sample_visible);
 
         // Evaluate the microfacet normal distribution
@@ -485,8 +491,8 @@ public:
         // roughness values at the current surface position.
         MicrofacetDistribution sample_distr(
             m_type,
-            m_alpha_u->eval_1(si, active),
-            m_alpha_v->eval_1(si, active),
+            filter_glossy_alpha(m_alpha_u->eval_1(si, active), si),
+            filter_glossy_alpha(m_alpha_v->eval_1(si, active), si),
             m_sample_visible
         );
 
@@ -551,8 +557,8 @@ public:
         // Construct the microfacet distribution matching the
         // roughness values at the current surface position.
         MicrofacetDistribution distr(m_type,
-                                     m_alpha_u->eval_1(si, active),
-                                     m_alpha_v->eval_1(si, active),
+                                     filter_glossy_alpha(m_alpha_u->eval_1(si, active), si),
+                                     filter_glossy_alpha(m_alpha_v->eval_1(si, active), si),
                                      m_sample_visible);
 
         // Evaluate the microfacet normal distribution

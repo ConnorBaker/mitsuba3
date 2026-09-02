@@ -139,6 +139,7 @@ def set_variant(*args: str) -> None:
             # nothing would re-register.
             for module_name in ('mitsuba.python.ad.integrators',
                                 'mitsuba.python.ad.loaders',
+                                'mitsuba.python.ad.bsdfs',
                                 'mitsuba.python.plugins.textures'):
                 _importlib.reload(_importlib.import_module(module_name))
 

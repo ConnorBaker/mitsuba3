@@ -26,9 +26,11 @@ MI_PY_EXPORT(BSDFSample) {
         .def_rw("eta", &BSDFSample3f::eta, D(BSDFSample3, eta))
         .def_rw("sampled_type", &BSDFSample3f::sampled_type, D(BSDFSample3, sampled_type))
         .def_rw("sampled_component", &BSDFSample3f::sampled_component, D(BSDFSample3, sampled_component))
+        .def_rw("sampled_roughness_squared", &BSDFSample3f::sampled_roughness_squared, D(BSDFSample3, sampled_roughness_squared))
         .def_repr(BSDFSample3f);
 
-    MI_PY_DRJIT_STRUCT(bs, BSDFSample3f, wo, pdf, eta, sampled_type, sampled_component);
+    MI_PY_DRJIT_STRUCT(bs, BSDFSample3f, wo, pdf, eta, sampled_type, sampled_component,
+                       sampled_roughness_squared);
 }
 
 /// Trampoline for derived types implemented in Python

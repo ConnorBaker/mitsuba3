@@ -13,6 +13,23 @@
 
 NAMESPACE_BEGIN(mitsuba)
 
+/**
+ * \brief Raise a microfacet roughness to the floor this interaction carries.
+ *
+ * This is the read side of Cycles' "filter glossy": the path integrator records how
+ * improbable the path reaching \c si was, converts that to a roughness in
+ * \ref SurfaceInteraction::min_alpha, and every microfacet lobe widens to at least that
+ * much -- \c bsdf_microfacet_blur in \c intern/cycles/kernel/closure/bsdf_microfacet.h
+ * does the same \c alpha = max(roughness, alpha) on the closure it has allocated.
+ *
+ * \c min_alpha is zero unless the integrator set it, so this is the identity for every
+ * scene that does not enable the mechanism.
+ */
+template <typename Float, typename SurfaceInteraction>
+MI_INLINE Float filter_glossy_alpha(const Float &alpha, const SurfaceInteraction &si) {
+    return dr::maximum(alpha, si.min_alpha);
+}
+
 /// Supported normal distribution functions
 enum class MicrofacetType : uint32_t {
     /// Beckmann distribution derived from Gaussian random surfaces

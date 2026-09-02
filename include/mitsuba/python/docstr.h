@@ -942,6 +942,8 @@ static const char *__doc_mitsuba_BSDFSample3_pdf = R"doc(Probability density at 
 
 static const char *__doc_mitsuba_BSDFSample3_sampled_component = R"doc(Stores the component index that was sampled by `BSDF.sample()`)doc";
 
+static const char *__doc_mitsuba_BSDFSample3_sampled_roughness_squared = R"doc(Squared microfacet roughness of the lobe that was sampled, or zero when the BSDF did not report one. Zero is the "not reported" sentinel; a delta lobe is identified from sampled_type, and a non-delta lobe that reports nothing is read as fully rough (1), which is what Cycles does for a non-microfacet closure.)doc";
+
 static const char *__doc_mitsuba_BSDFSample3_sampled_type = R"doc(Stores the component type that was sampled by `BSDF.sample()`)doc";
 
 static const char *__doc_mitsuba_BSDFSample3_wo = R"doc(Normalized outgoing direction in local coordinates)doc";
@@ -8893,6 +8895,8 @@ static const char *__doc_mitsuba_RayDifferential_RayDifferential_5 = R"doc()doc"
 static const char *__doc_mitsuba_RayDifferential_d_x = R"doc()doc";
 
 static const char *__doc_mitsuba_RayDifferential_d_y = R"doc()doc";
+
+static const char *__doc_mitsuba_RayDifferential_diff_scale = R"doc()doc";
 
 static const char *__doc_mitsuba_RayDifferential_fields = R"doc()doc";
 

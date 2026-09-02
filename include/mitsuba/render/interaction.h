@@ -279,6 +279,31 @@ struct SurfaceInteraction : Interaction<Float_, Spectrum_> {
     /// Instance index. The value 0 encodes that the shape is not instanced.
     Index instance_index = 0;
 
+    /**
+     * \brief Lower bound on microfacet roughness imposed by the path so far
+     *        ("filter glossy").
+     *
+     * Zero -- the default, and what \c dr::zeros produces -- disables the
+     * mechanism entirely, so a scene that never sets it renders exactly as
+     * before. When positive, a microfacet BSDF evaluated at this interaction
+     * must widen its roughness to at least this value:
+     * \c alpha = max(alpha, min_alpha).
+     *
+     * This mirrors Cycles, which blurs the closures it has just allocated for
+     * a shade point when the path that arrived there was improbable -- see
+     * \c intern/cycles/kernel/integrator/surface_shader.h, where
+     * \c blur_pdf = filter_glossy * min_ray_pdf and, for \c blur_pdf < 1,
+     * \c blur_roughness = sqrt(1 - blur_pdf) * 0.5 is handed to \c bsdf_blur.
+     * The value belongs on the interaction rather than on \ref BSDFContext
+     * because it varies per lane, and \ref BSDFContext is a scalar POD shared
+     * by every lane of a vectorized call.
+     *
+     * Note this is a deliberately BIASED variance-reduction heuristic: it
+     * trades correctness for a large reduction in caustic noise. It exists
+     * here to reproduce Cycles, not because it is unbiased.
+     */
+    Float min_alpha = 0.f;
+
     // =============================================================
 
     // =============================================================
@@ -635,7 +660,7 @@ struct SurfaceInteraction : Interaction<Float_, Spectrum_> {
 
     DRJIT_STRUCT(SurfaceInteraction, t, time, wavelengths, p, n, shape, uv,
                  sh_frame, frame_flipped, dp_du, dp_dv, dn_du, dn_dv, duv_dx,
-                 duv_dy, wi, prim_index, instance_index)
+                 duv_dy, wi, prim_index, instance_index, min_alpha)
 };
 
 // -----------------------------------------------------------------------------
