@@ -480,7 +480,8 @@ class BlenderPrincipledBSDF(mi.BSDF):
             # probabilities carry the same scale the evaluation does.
             if self.multiscatter:
                 weights.metallic *= ggx_energy_compensation(
-                    attr.roughness, mi.Frame3f.cos_theta(sh_wi), r0=attr.base_color
+                    microfacet_table_roughness(attr.roughness, attr.anisotropic),
+                    mi.Frame3f.cos_theta(sh_wi), r0=attr.base_color
                 )
 
         # Transmission lobe
@@ -587,7 +588,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 # the identical Kulla-Conty expression with `F_avg` in place of `Fss`, so
                 # passing Cycles' own `Fss` as `r0` reproduces it rather than approximating.
                 _S = ggx_energy_compensation(
-                    attr.roughness,
+                    microfacet_table_roughness(attr.roughness, attr.anisotropic),
                     mi.Frame3f.cos_theta(sh_wi),
                     r0=generalized_schlick_Fss(spec_r0, spec_eta),
                 )
@@ -608,7 +609,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 # with `base_color` 0 there is no substrate for the boost to be stolen back by.
                 # A control that only works on one of the two arms is the tell.
                 albedos.specular *= _S * ggx_directional_albedo(
-                    attr.roughness, mi.Frame3f.cos_theta(sh_wi)
+                    microfacet_table_roughness(attr.roughness, attr.anisotropic), mi.Frame3f.cos_theta(sh_wi)
                 )
                 attenuation = layering(albedos.specular, weights.specular, attenuation)
                 weights.specular *= _S

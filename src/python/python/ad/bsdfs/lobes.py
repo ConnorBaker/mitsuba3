@@ -164,9 +164,31 @@ def microfacet_compute_alphas(
     """
     roughness_2 = dr.square(roughness)
     aspect = dr.sqrt(1.0 - 0.9 * anisotropic)
-    return dr.maximum(dr.maximum(1e-4, min_alpha), roughness_2 / aspect), dr.maximum(
-        dr.maximum(1e-4, min_alpha), roughness_2 * aspect
-    )
+    # Cycles SATURATES both alphas in every microfacet setup (`bsdf_microfacet.h`,
+    # `bsdf->alpha_x = saturatef(bsdf->alpha_x)`), so the aspect split cannot push an
+    # axis past 1: at roughness 1, anisotropic 0.79, Cycles' lobe is (1.0, 0.537) where
+    # the unclamped split says (1.86, 0.537). Without the clamp the two engines render
+    # DIFFERENT distributions exactly where the energy tables are least forgiving --
+    # measured as the whole of `Steel Coated`'s furnace deficit (0.6014 at the
+    # roughness-1 corner, parity at 0.1793 where no axis clamps).
+    ax = dr.minimum(dr.maximum(dr.maximum(1e-4, min_alpha), roughness_2 / aspect), 1.0)
+    ay = dr.minimum(dr.maximum(dr.maximum(1e-4, min_alpha), roughness_2 * aspect), 1.0)
+    return ax, ay
+
+
+def microfacet_table_roughness(roughness: mi.Float, anisotropic: mi.Float) -> mi.Float:
+    """The roughness the GGX energy tables are read at, for an anisotropic lobe.
+
+    Cycles keys them on the CLAMPED alphas: `rough = sqrtf(sqrtf(alpha_x * alpha_y))`
+    (`bsdf_microfacet.h`, in `bsdf_microfacet_setup` and both fresnel variants). With no
+    anisotropy this is exactly `roughness`; with it, the saturation above makes the
+    geometric mean SMALLER than `roughness^2`, so keying the table on raw `roughness`
+    over-reads E and under-compensates -- the lobe goes dark. Deliberately WITHOUT the
+    filter-glossy `min_alpha` floor: Cycles computes `energy_scale` in setup, BEFORE
+    `bsdf_microfacet_blur` applies that floor, so the key never sees it.
+    """
+    ax, ay = microfacet_compute_alphas(roughness, anisotropic, 0.0)
+    return dr.sqrt(dr.sqrt(ax * ay))
 
 
 def microfacet_shadow_masking(
