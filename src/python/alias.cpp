@@ -174,6 +174,8 @@ static void set_variant(nb::args args) {
             // without re-executing the child, so nothing would re-register.
             mi_python = nb::module_::import_("mitsuba.python.plugins.textures");
             nb::steal(PyImport_ReloadModule(mi_python.ptr()));
+            mi_python = nb::module_::import_("mitsuba.python.plugins.emitters");
+            nb::steal(PyImport_ReloadModule(mi_python.ptr()));
         }
 
         // Only invoke user-provided callbacks after Mitsuba plugins have reloaded,

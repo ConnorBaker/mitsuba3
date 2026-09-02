@@ -11,7 +11,6 @@ if mi.variant() is not None and not mi.variant().startswith('scalar'):
         'blender_blackbody',
         'blender_geometry',
         'blender_image',
-        'blender_light_attenuation',
         'clamp',
         'color_ramp',
         'combine_color',
