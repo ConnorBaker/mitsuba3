@@ -843,8 +843,9 @@ public:
      *
      * A ray can only intersect this shape when the bitwise AND of its
      * ray-side mask and this value is nonzero. Ordinary shapes match every
-     * ray. Shapes with an attached emitter return its
-     * `Emitter.visibility_mask()`.
+     * ray. The value combines the shape's own Blender-style ``visible_*``
+     * properties with the attached emitter's `Emitter.visibility_mask()`
+     * (an emitter marked invisible clears the `RayMask.Camera` bit).
      */
     uint32_t visibility_mask() const;
 
@@ -950,6 +951,11 @@ protected:
     uint32_t m_discontinuity_types = (uint32_t) DiscontinuityFlags::Empty;
     /// Sampling weight (proportional to scene)
     float m_silhouette_sampling_weight;
+
+    /// Blender-style per-object ray visibility (see `RayMask`), parsed from
+    /// the ``visible_*`` shape properties; `RayMask::All` unless the scene
+    /// says otherwise. Combined with the emitter's mask in visibility_mask().
+    uint32_t m_visibility_mask = (uint32_t) RayMask::All;
 
     std::map<std::string, ref<Field>, std::less<>> m_texture_attributes;
 

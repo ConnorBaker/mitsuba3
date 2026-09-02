@@ -260,7 +260,6 @@ def _hidden_slab_scene(with_pane, slab=None, res=32, spp=512):
     return mi.load_dict(d)
 
 
-@pytest.mark.skip(reason="needs the per-object ray-visibility cluster (P6): shape property visible_camera does not exist yet on this branch")
 def test08_a_crossing_does_not_cost_the_ray_its_camera_visibility(variants_all_rgb):
     """A camera ray is still a camera ray after passing through a clear pane.
 
@@ -289,7 +288,6 @@ def test09_the_pane_is_not_what_makes_the_slab_invisible(variants_all_rgb):
     assert blocked < 1e-4, blocked
 
 
-@pytest.mark.skip(reason="needs the per-object ray-visibility cluster (P6): shape property visible_camera does not exist yet on this branch")
 def test10_the_flag_is_what_moves_the_image_not_the_crossing(variants_all_rgb):
     """And the same pair with NO pane, so the flag is shown to work on its own.
 

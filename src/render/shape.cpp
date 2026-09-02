@@ -58,6 +58,24 @@ MI_VARIANT Shape<Float, Spectrum>::Shape(const Properties &props)
     }
 
     m_silhouette_sampling_weight = props.get<ScalarFloat>("silhouette_sampling_weight", 1.0f);
+
+    /* Blender-style per-object ray visibility. The property names are Blender's own
+       (`Object.visible_camera` and friends) so that a converted scene reads the same on
+       both sides, and every one of them defaults to `true` -- a shape that mentions none
+       of them reports RayMask::All and takes the historical code path exactly. */
+    struct { const char *name; RayMask bit; } vis[] = {
+        { "visible_camera",         RayMask::Camera        },
+        { "visible_diffuse",        RayMask::Diffuse       },
+        { "visible_glossy",         RayMask::Glossy        },
+        { "visible_transmission",   RayMask::Transmission  },
+        { "visible_volume_scatter", RayMask::VolumeScatter },
+        { "visible_shadow",         RayMask::Shadow        }
+    };
+    m_visibility_mask = (uint32_t) RayMask::All;
+    for (auto &v : vis) {
+        if (!props.get<bool>(v.name, true))
+            m_visibility_mask &= ~((uint32_t) v.bit);
+    }
 }
 
 MI_VARIANT Shape<Float, Spectrum>::~Shape() { }
@@ -92,8 +110,11 @@ Shape<Float, Spectrum>::describe(ShapeIR &g) const {
 }
 
 MI_VARIANT uint32_t Shape<Float, Spectrum>::visibility_mask() const {
-    return m_emitter ? m_emitter->visibility_mask()
-                     : (uint32_t) RayMask::All;
+    /* The shape's own Blender-style switches AND the attached emitter's mask
+       (an emitter marked invisible clears the Camera bit). Both default to
+       RayMask::All, so an ordinary shape matches every ray. */
+    return m_emitter ? (m_visibility_mask & m_emitter->visibility_mask())
+                     : m_visibility_mask;
 }
 
 MI_VARIANT typename Shape<Float, Spectrum>::DirectionSample3f

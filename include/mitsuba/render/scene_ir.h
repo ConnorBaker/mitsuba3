@@ -138,6 +138,13 @@ struct InstanceEntry {
 
     /// Index + 1 of the owning ``instance``, or 0 for a top-level BLAS.
     uint32_t instance_index = 0;
+
+    /// Effective 8-bit visibility mask for this TLAS/IAS entry: the BLAS mask
+    /// for top-level geometry, AND-combined with the owning ``instance``
+    /// shape's mask for instanced geometry. Blender's per-object switches
+    /// belong to the OBJECT (the instance); the shared mesh data inside a
+    /// ShapeGroup ordinarily carries ``RayMask::All``.
+    uint32_t visibility_mask = 0xFFu;
 };
 
 /// Scene description consumed by acceleration-structure builders.

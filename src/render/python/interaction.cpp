@@ -12,5 +12,16 @@ MI_PY_EXPORT(RayFlags) {
 
     nb::enum_<RayMask>(m, "RayMask", nb::is_arithmetic(), D(RayMask))
         .def_value(RayMask, Camera)
+        // Literal docstrings until the next docstr.h regeneration.
+        .value("Diffuse", RayMask::Diffuse,
+               "Rays continuing after a diffuse scattering event")
+        .value("Glossy", RayMask::Glossy,
+               "Rays continuing after a glossy/specular reflection")
+        .value("Transmission", RayMask::Transmission,
+               "Rays continuing after a transmission event")
+        .value("VolumeScatter", RayMask::VolumeScatter,
+               "Rays continuing after a scattering event inside a participating medium")
+        .value("Shadow", RayMask::Shadow,
+               "Shadow rays, i.e. the occlusion test of next-event estimation")
         .def_value(RayMask, All);
 }

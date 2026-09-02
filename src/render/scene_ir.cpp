@@ -89,6 +89,7 @@ SceneIR SceneIRBuilder<Float, Spectrum>::build(Scene<Float, Spectrum> *scene) {
     for (uint32_t bi : sd.top_blases) {
         InstanceEntry e;
         e.blas_index = bi;
+        e.visibility_mask = sd.blases[bi].visibility_mask;
         sd.instances.push_back(e);
     }
     // ...then, per Instance shape, one instance per BLAS of its ShapeGroup.
@@ -102,6 +103,11 @@ SceneIR SceneIRBuilder<Float, Spectrum>::build(Scene<Float, Spectrum> *scene) {
             InstanceEntry e;
             e.blas_index = bi;
             e.instance_index = instance_index;
+            /* Blender's per-object ray-visibility switches live on the OBJECT,
+               which converts to this `instance`; the group's shared mesh data
+               ordinarily carries All. AND-combining honours a mask on either. */
+            e.visibility_mask =
+                inst.visibility_mask & sd.blases[bi].visibility_mask;
             for (int k = 0; k < 12; ++k)
                 e.to_world[k] = inst.to_world[k];
             sd.instances.push_back(e);

@@ -598,7 +598,11 @@ Scene<Float, Spectrum>::sample_emitter_direction(const Interaction3f &ref, const
 
         // Mark occluded samples as invalid if requested by the user
         if (test_visibility && dr::any_or<true>(active)) {
-            Mask occluded = ray_test(ref.spawn_ray_to(ds.p), active);
+            /* Shadow rays carry only the Shadow bit: a shape with
+               `visible_shadow = false` (Blender's per-object switch) does not
+               occlude. Ordinary shapes carry RayMask::All and occlude as before. */
+            Mask occluded = ray_test(ref.spawn_ray_to(ds.p), false, active,
+                                     UInt32((uint32_t) RayMask::Shadow));
             dr::masked(spec, occluded) = 0.f;
             dr::masked(ds.pdf, occluded) = 0.f;
         }
@@ -610,7 +614,11 @@ Scene<Float, Spectrum>::sample_emitter_direction(const Interaction3f &ref, const
 
         // Mark occluded samples as invalid if requested by the user
         if (test_visibility && dr::any_or<true>(active)) {
-            Mask occluded = ray_test(ref.spawn_ray_to(ds.p), active);
+            /* Shadow rays carry only the Shadow bit: a shape with
+               `visible_shadow = false` (Blender's per-object switch) does not
+               occlude. Ordinary shapes carry RayMask::All and occlude as before. */
+            Mask occluded = ray_test(ref.spawn_ray_to(ds.p), false, active,
+                                     UInt32((uint32_t) RayMask::Shadow));
             dr::masked(spec, occluded) = 0.f;
             dr::masked(ds.pdf, occluded) = 0.f;
         }
