@@ -170,6 +170,10 @@ MI_PY_EXPORT(Scene) {
              },
              D(Scene, integrator))
         .def_method(Scene, shapes_grad_enabled)
+        .def("has_null_bsdfs", &Scene::has_null_bsdfs,
+             "Does any shape in this scene carry a pass-through (null) BSDF? Integrators "
+             "use this to decide whether shadow rays must be marched rather than tested "
+             "with a single occlusion query.")
         .def("__repr__", &Scene::to_string);
 
     dr::bind_traverse(scene);
