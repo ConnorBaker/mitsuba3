@@ -111,7 +111,8 @@ install(TARGETS mitsuba_ext
 #   Copy & installation targets for files in 'src/python'
 # ----------------------------------------------------------
 
-file(GLOB_RECURSE MI_PYTHON_FILES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} *.py)
+# *.npy: the GGX energy tables shipped by mitsuba.python.ad.bsdfs
+file(GLOB_RECURSE MI_PYTHON_FILES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} *.py *.npy)
 
 set(MI_COPY_FILES "")
 foreach(file ${MI_PYTHON_FILES})

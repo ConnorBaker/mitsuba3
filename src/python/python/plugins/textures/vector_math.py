@@ -1,0 +1,137 @@
+from __future__ import annotations # Delayed parsing of type annotations
+
+import drjit as dr
+import mitsuba as mi
+from ._base import TextureBase
+
+from .blender_math import (
+    blender_round, blender_trunc, compatible_sign, fract, safe_divide, safe_modulo,
+    safe_pow, wrap)
+
+
+def safe_normalize(v):
+    n = dr.norm(v)
+    return dr.select(n > 0.0, v / dr.select(n > 0.0, n, 1.0), 0.0)
+
+
+def project(a, b):
+    ls = dr.dot(b, b)
+    return dr.select(ls != 0.0, b * (dr.dot(a, b) / dr.select(ls != 0.0, ls, 1.0)), 0.0)
+
+
+def reflect(incident, normal):
+    # Cycles: `incident - 2 * dot(incident, n) * n`. `mi.reflect` is the OPTICS convention,
+    # `2 * dot(wi, m) * m - wi`, which is the NEGATIVE of this -- so every Reflect node came
+    # out mirrored. Rendered: Mitsuba's image was exactly minus Cycles'.
+    n = safe_normalize(normal)
+    return incident - 2.0 * dr.dot(incident, n) * n
+
+
+def refract(incident, normal, eta):
+    normal = safe_normalize(normal)
+    dot_ni = dr.dot(normal, incident)
+    k = 1.0 - eta * eta * (1.0 - dot_ni * dot_ni)
+    return dr.select(k < 0.0, 0.0,
+                     eta * incident - (eta * dot_ni + dr.sqrt(dr.maximum(k, 0.0))) * normal)
+
+
+# Supported math operators
+# See blender implementation: https://github.com/blender/blender/blob/594f47ecd2d5367ca936cf6fc6ec8168c2b360d0/source/blender/gpu/shaders/material/gpu_shader_material_math.glsl#L203
+OPERATORS = {
+    'ADD':            (lambda a, b, c: a + b),
+    # HSR: Blender's identifier is 'SUBTRACT'; 'SUBSTRACT' is a typo this table shipped
+    # with, kept as an alias so an unpatched exporter still works.
+    'SUBTRACT':       (lambda a, b, c: a - b),
+    'SUBSTRACT':      (lambda a, b, c: a - b),
+    'MULTIPLY':       (lambda a, b, c: a * b),
+    'DIVIDE':         (lambda a, b, c: safe_divide(a, b)),  # HSR: Blender returns 0 on b == 0
+    'MULTIPLY_ADD':   (lambda a, b, c: a * b + c),
+
+    # HSR: was `cross(b, a)` -- the operands REVERSED, so every cross product came out
+    # negated. Caught by rendering it: Mitsuba's mean was exactly minus Cycles'.
+    'CROSS_PRODUCT':  (lambda a, b, c: dr.cross(a, b)),
+    'PROJECT':        (lambda a, b, c: project(a, b)),
+    'REFLECT':        (lambda a, b, c: reflect(a, b)),
+    'REFRACT':        (lambda a, b, c: refract(a, b, c.x)),
+    'FACEFORWARD':    (lambda a, b, c: dr.select(dr.dot(b, c) < 0.0, a, -a)),
+    'DOT_PRODUCT':    (lambda a, b, c: dr.dot(a, b)),
+    'DISTANCE':       (lambda a, b, c: dr.norm(a - b)),
+    'LENGTH':         (lambda a, b, c: dr.norm(a)),
+    'SCALE':          (lambda a, b, c: a * b),
+    'NORMALIZE':      (lambda a, b, c: safe_normalize(a)),
+
+    'WRAP':           (lambda a, b, c: wrap(a, b, c)),
+    'SNAP':           (lambda a, b, c: dr.floor(safe_divide(a, b)) * b),
+    # HSR: POWER, SIGN and ROUND are identifiers Blender's Vector Math node can emit and
+    # this table had no entry for, i.e. a KeyError per sample at render time.
+    'POWER':          (lambda a, b, c: safe_pow(a, b)),
+    # HSR: `dr.sign(0) == 1`; Blender's `compatible_sign(0) == 0`, and a z component
+    # left at exactly 0 is the commonest coordinate there is.
+    'SIGN':           (lambda a, b, c: compatible_sign(a)),
+    'ROUND':          (lambda a, b, c: blender_round(a)),
+    'FLOOR':          (lambda a, b, c: dr.floor(a)),
+    'TRUNC':          (lambda a, b, c: blender_trunc(a)),
+    'CEIL':           (lambda a, b, c: dr.ceil(a)),
+    'ABSOLUTE':       (lambda a, b, c: dr.abs(a)),
+    'FRACTION':       (lambda a, b, c: fract(a)),
+    'MODULO':         (lambda a, b, c: safe_modulo(a, b)),
+    'MINIMUM':        (lambda a, b, c: dr.minimum(a, b)),
+    'MAXIMUM':        (lambda a, b, c: dr.maximum(a, b)),
+    'SINE':           (lambda a, b, c: dr.sin(a)),
+    'COSINE':         (lambda a, b, c: dr.cos(a)),
+    'TANGENT':        (lambda a, b, c: dr.tan(a)),
+}
+
+class VectorMath(TextureBase):
+    '''
+    Vector math Blender shader node texture.
+    '''
+    def __init__(self, props):
+        TextureBase.__init__(self, props)
+        # HSR: `get_texture` builds an SRGBReflectanceSpectrum from an `rgb` constant, which
+        # REJECTS any component outside [0, 1]. These are coordinates and arithmetic operands, not
+        # reflectances -- a Mapping location of -0.27, a Vector Math operand of 2.0 and a Math
+        # operand of -1.0 are all ordinary -- so they take the UNBOUNDED form. This was not a
+        # theoretical concern: it was found by rendering a Mapping node with a negative Location.
+        self.input_0 = props.get_unbounded_texture('input_0')
+        self.input_1 = props.get_unbounded_texture('input_1', 0.0)
+        self.input_2 = props.get_unbounded_texture('input_2', 0.0)
+        self.mode = str(props.get('mode'))
+
+        if not self.mode in OPERATORS.keys():
+            mi.Log(mi.LogLevel.Error, f'Unknown vector math operator: {self.mode}')
+
+    def traverse(self, cb):
+        cb.put('input_0', self.input_0, +mi.ParamFlags.Differentiable)
+        cb.put('input_1', self.input_1, +mi.ParamFlags.Differentiable)
+        cb.put('input_2', self.input_2, +mi.ParamFlags.Differentiable)  # HSR: was input_1
+
+    def eval_color3(self, si, active):
+        return mi.UnpolarizedSpectrum(self.eval_3(si, active))
+
+    def eval_1(self, si, active):
+        return mi.Float(self.eval_3(si, active).x)
+
+    def eval_3(self, si, active):
+        return mi.Color3f(self.process(
+            self.input_0.eval_3(si, active),
+            self.input_1.eval_3(si, active),
+            self.input_2.eval_3(si, active)
+        ))
+
+    def process(self, a, b, c):
+        return OPERATORS[self.mode](a, b, c)
+
+    def mean(self):
+        return self.input_0.mean() # TODO best effort
+
+    def resolution(self):
+        return self.input_0.resolution()
+
+    def is_spatially_varying(self):
+        return any([t.is_spatially_varying() for t in [self.input_0, self.input_1, self.input_2]])
+
+    def to_string(self):
+        return f'VectorMath[input_0={self.input_0}, input_1={self.input_1}, input_2={self.input_2}, mode={self.mode}]'
+
+mi.register_field('vector_math', lambda props: VectorMath(props))
