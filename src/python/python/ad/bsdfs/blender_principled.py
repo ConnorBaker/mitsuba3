@@ -209,7 +209,11 @@ class BlenderPrincipledBSDF(mi.BSDF):
             components.append(f)
             self.components_mapping.specular = len(components) - 1
 
-        if self.two_sided:
+        # A transmissive material is double-sided in Cycles even though it cannot be
+        # wrapped in `twosided` here: `shader_setup_from_ray` flips `sd->N`/`sd->Ng` on
+        # EVERY backfacing hit, so all of its closures shade on interior hits too. The
+        # impls reproduce that with the unconditional mirror; the flags must agree.
+        if self.two_sided or self.has_transmission:
             for i in range(len(components)):
                 components[i] |= F.FrontSide | F.BackSide
 
@@ -292,7 +296,6 @@ class BlenderPrincipledBSDF(mi.BSDF):
             else mi.Normal3f(0.5, 0.5, 1.0)
         )
         attr.eta = sanitize_eta(self.eta)
-        attr.two_sided = mi.Bool(self.two_sided)
         attr.alpha = (
             dr.clip(self.alpha.eval_1(si, active), 0.0, 1.0)
             if self.has_alpha
@@ -304,13 +307,19 @@ class BlenderPrincipledBSDF(mi.BSDF):
         self,
         attr: dotdict,
         ctx: mi.BSDFContext,
-        geo_wi: mi.Vector3f,
         sh_wi: mi.Vector3f,
         wh: mi.Vector3f,
         cc_wi: mi.Vector3f,
+        glass_eta: mi.Float,
     ) -> Tuple[dotdict, dotdict, dotdict]:
         """
-        Calculate lobe weights, sampling weights and masks
+        Calculate lobe weights, sampling weights and masks.
+
+        Runs entirely in the MIRRORED space: the callers abs `si.wi.z` unconditionally
+        before building `sh_wi`/`wh`/`cc_wi`, exactly as Cycles' closures only ever see
+        the flipped `sd->N`. `glass_eta` is the side-corrected relative IOR
+        (`bsdf->ior = backfacing ? 1/ior : ior` in `svm/closure.h`) -- the ONE quantity
+        through which the glass lobes still know which side of the interface they are on.
         """
         weights = dotdict()
         weights.diffuse = mi.UnpolarizedSpectrum(attr.diffuse)
@@ -332,75 +341,25 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # Only lobes with non-zero weights are considered as active
         masks = dotdict({k: (dr.mean(v) > 0.0) for k, v in weights.items()})
 
-        # Masks lobes that only affect rays on the front side.
-        #
-        # `front_side` is `dot(N', wi) > 0` -- the view against the BUMP/NORMAL-MAPPED
-        # closure normal, not the geometric one. Cycles applies that test to the MICROFACET
-        # closures only (`bsdf_microfacet_eval` rejects `cos_NI <= 0`); its diffuse-range
-        # closures do not test the view at all. `bsdf_diffuse_eval` and `bsdf_sheen_eval`
-        # both declare the incident direction as `const float3 /*wi*/` -- unnamed, unused --
-        # and `bsdf_oren_nayar_get_intensity` CLAMPS the view cosine rather than rejecting on
-        # it. So diffuse and sheen are excluded from this test.
-        #
-        # THIS is where the strong-bump deficit lived, and it sits UPSTREAM of the per-lobe
-        # masks in `_eval_pdf_impl`. Those were relaxed to Cycles' one-direction form first
-        # and the panel came back BIT-IDENTICAL -- because `weights.diffuse` had already been
-        # zeroed here, so the relaxed mask had nothing left to admit. Measured on the traced
-        # camera rays of a plane carrying a sinusoidal height map at peak gradient 201/uv:
-        # 43.5% of hit pixels have the view below the bumped horizon, and every one of them
-        # returned zero sample weight, zero pdf and zero eval -- black in Mitsuba, lit in
-        # Cycles. With this line removed those same lanes return a 0.410 mean sample weight
-        # against the above-horizon lanes' 0.455, and their zero-weight share falls from
-        # 100% to 48.8% -- next to the above-horizon 43.2%, which is the hemisphere clipping
-        # both engines legitimately do.
-        #
-        # A plane carrying a sinusoidal height map, correction OFF in both engines, res 160,
-        # sweeping frequency and amplitude independently so the DIAGONALS hold peak height
-        # gradient constant while frequency moves 64x. mi/cy before -> after:
-        #
-        #     g/uv     12.6     50.3      201.1     804.2
-        #     before   1.0004   0.7733    0.6337    0.7309
-        #     after    1.0004   1.0001    1.0024    1.0033
-        #
-        # The cells that were already exact stayed exact; worst deviation over the whole
-        # 16-cell grid is now 0.33%. The deficit had tracked the GRADIENT -- the tilt -- and
-        # not the frequency, which is what ruled out a footprint or texture-filtering cause
-        # before this site was found: it was flat across 64x in frequency at fixed gradient
-        # and across an 8x change in render resolution. Three upstream candidates were
-        # measured and cleared first -- the exported bump dict is exact, the in-render
-        # footprint is 0.967x the analytic one-pixel footprint, and the perturbed normal
-        # matches Cycles' own bump-normal render to 0.024 deg mean at the worst cell.
-        #
-        # A genuine BACK-FACE hit is still rejected, but by the OUTGOING direction rather
-        # than here: `_eval_pdf_impl` masks the diffuse-range lobes with `cos_theta(wo) > 0`
-        # in the closure frame, which is exactly the `max(dot(N, wo), 0)` that zeroes Cycles'
-        # own diffuse closure there.
-        #
-        # -----------------------------------------------------------------------------
-        # The MICROFACET half of the same statement, which is a different fix.
-        #
-        # GEOMETRIC, not shading, and this half was NOT obvious. These masks feed the
-        # LAYERING BUDGET below (`met_frac`, and the `attenuation` each lobe consumes), not
-        # just the evaluation. Testing the budget against the SHADING horizon means a metal
-        # whose closure normal has tilted past the view stops claiming its share -- and
-        # `weights.diffuse *= attenuation` then hands the whole budget to DIFFUSE, turning a
-        # mirror into a Lambertian wherever the bump is steep. Measured while writing this:
-        # at 80 deg of normal-map tilt a `metallic = 1` material returned a full-strength
-        # diffuse lobe below the horizon. Cycles has no such fallback -- its microfacet
-        # closure simply evaluates to zero there and the energy is lost.
-        #
-        # Only a genuine BACK-FACE hit means the lobe is absent and its budget is free, which
-        # is what `geo_wi` tests. The shading-horizon rejection these lines used to perform is
-        # not dropped: it moves to `_eval_pdf_impl` as `incoming_above_shading`, where it acts
-        # on evaluation alone. For a material with no normal map the two frames agree in sign
-        # and this is a no-op.
-        front_side = is_front_side(geo_wi)
-        masks.clearcoat &= front_side
-        masks.metallic &= front_side
-        masks.specular &= front_side
+        # NO SIDE MASK ON ANY LOBE'S BUDGET. There used to be one: a geometric
+        # `front_side` test zeroed clearcoat/metallic/specular here (it replaced an
+        # earlier SHADING-horizon test, whose removal was the strong-bump deficit fix --
+        # the shading-horizon rejection lives on in `_eval_pdf_impl` as
+        # `incoming_above_shading`, on evaluation alone). But a side mask on the budget
+        # has no Cycles analogue at all: `shader_setup_from_ray` flips `sd->N`/`sd->Ng`
+        # on every backfacing hit, so every closure is built and layered on the flipped
+        # frame -- there IS no back side by the time the closures exist. The callers now
+        # mirror unconditionally, so `sh_wi` here is always on the incident side and the
+        # cascade below is Cycles' layering verbatim on both sides of a surface.
+        # History (the measured strong-bump ladder, the metal-turned-Lambertian budget
+        # bug, the interior-hit budget destruction and its stopgap re-route): git log.
 
-        # Fresnel coefficient for the main specular.
-        F_spec_dielectric = mi.fresnel(dr.dot(sh_wi, wh), attr.eta)[0]
+        # Fresnel coefficient for the main specular. `glass_eta`, not `attr.eta`: this
+        # split plays the role of the fresnel INSIDE Cycles' glass closure, which reads
+        # the side-corrected `bsdf->ior`. In the mirrored space `dot(sh_wi, wh)` is
+        # positive on interior hits, so `mi.fresnel`'s own negative-cosine flip can no
+        # longer stand in for it.
+        F_spec_dielectric = mi.fresnel(dr.dot(sh_wi, wh), glass_eta)[0]
         masks.specular &= F_spec_dielectric > 0.0
 
         # Masks lobes based on flags enabled in the BSDF context
@@ -492,25 +451,17 @@ class BlenderPrincipledBSDF(mi.BSDF):
             albedos.trans_refract = mi.UnpolarizedSpectrum(
                 (1.0 - F_spec_dielectric) * dr.sqrt(attr.base_color)
             )
-            # HSR: same defect, and this is the one that dominates. On a BACK-SIDE hit the
-            # reflective lobes are all masked off, so the `1 - transmission` remainder has
-            # no lobe left to carry it and is destroyed. Inside the medium the interface is
-            # transmissive-only, so the remainder belongs to the transmission lobes.
-            #
-            # The side test is GEOMETRIC. It asks "are we inside the medium", and only the
-            # geometry answers that: with a strong normal map a front-facing hit can put
-            # `sh_wi` below the closure horizon without being inside anything, and a
-            # shading-frame test would then hand the budget to transmission on a solid
-            # surface -- while diffuse, which no longer carries a shading-frame front-side
-            # mask, also claimed it. For a material with no normal map the two frames agree
-            # in sign and this is a no-op.
-            back = ~is_front_side(geo_wi)
-            weights.trans_reflect = dr.select(back, mi.UnpolarizedSpectrum(attenuation),
-                                              weights.trans_reflect)
-            weights.trans_refract = dr.select(back, mi.UnpolarizedSpectrum(attenuation),
-                                              weights.trans_refract)
-            trans_frac = dr.select(back, mi.Float(1.0), attr.transmission)
-            attenuation = sanitize(attenuation * (1.0 - trans_frac))
+            # HSR: the SAME split on both sides of the interface. An interior hit used to
+            # send the entire remaining budget to the transmission lobes (`trans_frac = 1`
+            # on the back side) -- a stopgap for the era when the reflective lobes were
+            # side-masked off and the `1 - transmission` remainder would otherwise have
+            # been destroyed. Cycles has no such re-route: on a backfacing hit its
+            # closures are all built on the flipped normal and the glass closure still
+            # takes exactly `transmission_weight * weight`, with the remainder flowing to
+            # specular and diffuse (`svm/closure.h`, `weight *= 1 - transmission_weight`
+            # with no side test anywhere near it). With the unconditional mirror those
+            # lobes now carry their share on interior hits, so the re-route is gone.
+            attenuation = sanitize(attenuation * (1.0 - attr.transmission))
             # HSR: multiple-scattering compensation for the glass lobe, from `ggx_glass_E`.
             # Applied to BOTH halves because that table integrates the reflected and the
             # refracted albedo together -- they are one lobe as far as the energy is
@@ -684,10 +635,10 @@ class BlenderPrincipledBSDF(mi.BSDF):
         n = mi.Vector3f(frame.n)
 
         ng = si.to_local(mi.Vector3f(si.n))
-        # Mirror into the same reflected local space the two-sided handling put `si.wi`
-        # in (the mirror negates z only), then flip onto the incident side -- Cycles'
-        # backfacing flip of `sd->Ng`.
-        ng.z[attr.two_sided] = dr.mulsign(ng.z, wiz0)
+        # Mirror into the same reflected local space the unconditional mirror put
+        # `si.wi` in (the mirror negates z only), then flip onto the incident side --
+        # Cycles' backfacing flip of `sd->Ng`.
+        ng.z = dr.mulsign(ng.z, wiz0)
         wi = si.wi
         ng = dr.mulsign(ng, dr.dot(ng, wi))
 
@@ -821,21 +772,34 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # `wiz0` is the PRE-mirror sign of `si.wi.z`, which the geometric normal below
         # needs. An integrator's eval/pdf call passes an unmirrored `si`, so it is
         # captured here; `_sample_impl` calls in with an `si` whose `wi.z` was ALREADY
-        # abs'd, so it must pass its own pre-flip copy -- otherwise a two-sided
+        # abs'd, so it must pass its own pre-flip copy -- otherwise a
         # back-face sample's `bs.pdf` is computed in a differently-mirrored glossy
         # frame than the integrator's `pdf()` query for the same direction (MIS bias).
         if wiz0 is None:
             wiz0 = mi.Float(si.wi.z)
-        wo_.z[attr.two_sided] = dr.mulsign(wo_.z, si.wi.z)
-        si.wi.z[attr.two_sided] = dr.abs(si.wi.z)
+        # THE MIRROR IS UNCONDITIONAL, matching Cycles' `shader_setup_from_ray`, which
+        # flips `sd->N` and `sd->Ng` on EVERY backfacing hit -- there is no un-flipped
+        # shading in that engine. A transmissive material cannot be wrapped in
+        # `twosided`, so its interior hits used to arrive here un-mirrored and every
+        # reflective lobe died on its own side tests; the `1 - transmission` budget was
+        # then re-routed to the glass lobes (`_lobe_weights`' old back-side override),
+        # which is a different interior model than Cycles' (all closures alive on the
+        # flipped frame). The glass lobes keep their inside/outside physics through
+        # `glass_eta` below -- Cycles' `bsdf->ior = backfacing ? 1/ior : ior`
+        # (`svm/closure.h`); the specular lobe's eta is NOT flipped there, and is not
+        # flipped here.
+        wo_.z = dr.mulsign(wo_.z, si.wi.z)
+        si.wi.z = dr.abs(si.wi.z)
+        glass_eta = dr.select(wiz0 >= 0.0, attr.eta, dr.rcp(attr.eta))
 
         # Apply normalmap
         frame = compute_normalmap_frame(si, attr.normal, rot=attr.anisotropic_rot)
         wi = frame.to_local(si.wi)
         wo = frame.to_local(wo_)
 
-        # Compute half vector
-        wh = half_vector(wi, wo, attr.eta)
+        # Compute half vector. In the mirrored space a refraction configuration has its
+        # relative IOR inverted on interior hits, so the half-vector uses `glass_eta`.
+        wh = half_vector(wi, wo, glass_eta)
 
         # Cycles' bump-map correction, piece 3: the GLOSSY lobes see a closure normal
         # raised so the specular reflection clears the geometric surface; the
@@ -846,7 +810,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
             g_frame = frame
         wi_g = g_frame.to_local(si.wi)
         wo_g = g_frame.to_local(wo_)
-        wh_g = half_vector(wi_g, wo_g, attr.eta)
+        wh_g = half_vector(wi_g, wo_g, glass_eta)
 
         # Apply normalmap for clearcoat lobe
         cc_frame = compute_normalmap_frame(si, normal=attr.clearcoat_normal)
@@ -854,7 +818,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         # Compute lobe weights and sample weights
         weights, sampling_weights, masks = self._lobe_weights(
-            attr, ctx, si.wi, wi, wh, cc_wi
+            attr, ctx, wi, wh, cc_wi, glass_eta
         )
 
         # Shading and geometric horizon validity flags
@@ -987,7 +951,12 @@ class BlenderPrincipledBSDF(mi.BSDF):
             )
             pdf[masks.metallic] += sampling_weights.metallic * metal_pdf
 
-        # Glass lobe
+        # Glass lobe. `eta=glass_eta` is the side-corrected IOR -- Cycles'
+        # `bsdf->ior = backfacing ? 1/ior : ior` -- which its fresnel ALSO reads
+        # (`microfacet_fresnel` passes `bsdf->ior` into the real-Fresnel curve).
+        # `r0` stays on `attr.eta`: Cycles builds `fresnel->f0` from the UN-flipped ior
+        # (`generalized_schlick_setup(ior, ...)`), and `F0_from_ior` is reciprocal-
+        # symmetric anyway, so the two spellings agree.
         if self.has_transmission:
             reflect_value, reflect_pdf = MicrofacetLobe.eval_pdf(
                 wi_g,
@@ -997,7 +966,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 min_alpha=attr.min_alpha,
                 anisotropic=attr.anisotropic,
                 fresnel_mode=MicrofacetFresnel.GENERALIZED_SCHLICK,
-                eta=attr.eta,
+                eta=glass_eta,
                 r0=eta_to_r0(attr.eta) * attr.spec_tint,
                 correlated_shadow_masking=True,
             )
@@ -1014,7 +983,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
                 min_alpha=attr.min_alpha,
                 anisotropic=attr.anisotropic,
                 fresnel_mode=MicrofacetFresnel.GENERALIZED_SCHLICK,
-                eta=attr.eta,
+                eta=glass_eta,
                 r0=eta_to_r0(attr.eta) * attr.spec_tint,
                 correlated_shadow_masking=True,
             )
@@ -1074,9 +1043,11 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         null_wi = mi.Vector3f(si.wi)
 
-        # Two-sided
+        # Unconditional mirror -- see the twin comment in `_eval_pdf_impl`. `null_wi`
+        # keeps the pre-mirror direction: its z sign is the true geometric side.
         si = mi.SurfaceInteraction3f(si)
-        si.wi.z[attr.two_sided] = dr.abs(si.wi.z)
+        si.wi.z = dr.abs(si.wi.z)
+        glass_eta = dr.select(null_wi.z >= 0.0, attr.eta, dr.rcp(attr.eta))
 
         # Apply normalmap
         frame = compute_normalmap_frame(si, attr.normal, rot=attr.anisotropic_rot)
@@ -1109,7 +1080,7 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
         # Compute lobe weights and sample weights
         weights, sampling_weights, _ = self._lobe_weights(
-            attr, ctx, si.wi, wi, wh, cc_wi
+            attr, ctx, wi, wh, cc_wi, glass_eta
         )
 
         # Pick lobe based on weights
@@ -1174,10 +1145,13 @@ class BlenderPrincipledBSDF(mi.BSDF):
 
             # Refraction
             b = dr.zeros(mi.BSDFSample3f)
-            b.wo = g_frame.to_world(microfacet_refract(wi_g, wh_g, attr.eta))
+            # `glass_eta`, not a side test on `wi_g`: in the mirrored space `wi_g` is
+            # ALWAYS on the front side, so a test on it can never flip -- the true
+            # geometric side lives in `null_wi.z`, which `glass_eta` was built from.
+            b.wo = g_frame.to_world(microfacet_refract(wi_g, wh_g, glass_eta))
             b.sampled_component = self.components_mapping.trans_refract
             b.sampled_type = +mi.BSDFFlags.GlossyTransmission
-            b.eta = dr.select(is_front_side(wi_g), attr.eta, dr.rcp(attr.eta))
+            b.eta = mi.Float(glass_eta)
             bs[masks.trans_refract & is_refraction(si.wi, b.wo)] = b
 
         if self.has_alpha:
@@ -1203,14 +1177,15 @@ class BlenderPrincipledBSDF(mi.BSDF):
         # Compute sampling weight
         weight = dr.select(active, value / bs.pdf, 0.0)
 
-        # Two-sided. `si.wi.z` is NOT the sign to restore here: line ~907 already
-        # overwrote it with `dr.abs(si.wi.z)`, so `mulsign` against it can only ever
+        # Un-mirror. `si.wi.z` is NOT the sign to restore here: it was already
+        # overwritten with `dr.abs(si.wi.z)` above, so `mulsign` against it can only ever
         # multiply by +1 and this flip-back silently does nothing. `null_wi` is the
         # pre-flip copy and carries the original sign. `_eval_pdf_impl` performs the same
         # two steps in the OPPOSITE order (mulsign first, then abs), which is why eval/pdf
         # were correct while sample was not -- and why `bsdf.pdf(bs.wo)` returns 0 on
-        # exactly the samples this line failed to flip.
-        bs.wo.z[attr.two_sided & ~masks.null] = dr.mulsign(bs.wo.z, null_wi.z)
+        # exactly the samples this line failed to flip. The null lobe's direction was
+        # built from the un-mirrored `null_wi` and must not be flipped.
+        bs.wo.z[~masks.null] = dr.mulsign(bs.wo.z, null_wi.z)
 
         return bs, weight
 
