@@ -59,7 +59,8 @@ def test02_intersection_construction(variant_scalar_rgb):
   duv_dy=[26, 27],
   wi=[31, 32, 33],
   prim_index=34,
-  instance_index=0
+  instance_index=0,
+  min_alpha=0
 ]"""
 
 
