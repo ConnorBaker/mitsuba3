@@ -849,6 +849,17 @@ public:
      */
     uint32_t visibility_mask() const;
 
+    /**
+     * Does this shape carry texture attributes (`Field` children attached at
+     * construction time)?
+     *
+     * Relevant to `Mesh.merge()`: these live on the Shape rather than in the
+     * mesh data, so a rebuilt merged mesh would silently lose them.
+     */
+    bool has_texture_attributes() const {
+        return !m_texture_attributes.empty();
+    }
+
     /// Is this shape also an area sensor?
     bool is_sensor() const { return (bool) m_sensor; }
 
@@ -950,7 +961,13 @@ protected:
 
     uint32_t m_discontinuity_types = (uint32_t) DiscontinuityFlags::Empty;
     /// Sampling weight (proportional to scene)
-    float m_silhouette_sampling_weight;
+    ///
+    /// The in-class initializer matters: the ``Shape()`` default constructor
+    /// (used by the direct ``Mesh(name, ...)`` construction path, which never
+    /// sees a ``Properties``) otherwise leaves this uninitialized, and
+    /// ``Mesh::merge_key()`` compares it -- merging meshes built that way then
+    /// fails on garbage inequality.
+    float m_silhouette_sampling_weight = 1.f;
 
     /// Blender-style per-object ray visibility (see `RayMask`), parsed from
     /// the ``visible_*`` shape properties; `RayMask::All` unless the scene

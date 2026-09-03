@@ -23,7 +23,14 @@ public:
             ref<Object> shape = prop.get<ref<Object>>();
             Mesh *mesh = prop.try_get<Mesh>();
 
-            if (!mesh || mesh->has_mesh_attributes()) {
+            /* Texture attributes are excluded like mesh attributes: a `Field`
+               child of a shape becomes a texture attribute at LOAD time
+               (`Shape`'s constructor), which is exactly when merging runs,
+               and `Mesh::merge()` rebuilds the fused mesh from a `Properties`
+               those are never written into -- the attribute would silently
+               vanish and any BSDF reading it would find nothing. */
+            if (!mesh || mesh->has_mesh_attributes() ||
+                mesh->has_texture_attributes()) {
                 m_objects.push_back(shape);
                 ignored++;
                 continue;
