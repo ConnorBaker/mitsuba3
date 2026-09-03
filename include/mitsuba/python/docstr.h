@@ -9394,7 +9394,16 @@ Note:
 
 static const char *__doc_mitsuba_Sampler_compute_per_sequence_seed = R"doc(Generates a array of seeds where the seed values are unique per sequence)doc";
 
-static const char *__doc_mitsuba_Sampler_current_sample_index = R"doc(Return the index of the current sample)doc";
+static const char *__doc_mitsuba_Sampler_current_sample_index =
+R"doc(\brief Return the 0-based index of the current sample, per lane.
+
+In scalar mode this is simply how often \ref advance() has run since the
+last \ref seed(). In wavefront modes every sample of a pixel is its own
+lane of one launch, so the index combines the in-wavefront offset with
+the pass counter: <tt>m_sample_index * samples_per_wavefront +
+lane % samples_per_wavefront</tt>. Public because a consistent
+(sample-index-dependent) integrator needs it -- see the \c path plugin's
+regularization -- not only the samplers themselves.)doc";
 
 static const char *__doc_mitsuba_Sampler_fork =
 R"doc(Create a fork of this sampler.
@@ -11177,6 +11186,9 @@ This operation is used by the KDTree acceleration structure.
 
 Args:
     ray: The ray to be tested for an intersection
+
+    prim_index: Index of the primitive to be intersected. This index
+    is ignored by a shape that contains a single primitive.
 
 Returns:
     A tuple containing the following field: ``valid``, ``t``, ``uv``,

@@ -49,16 +49,21 @@ the PR's 39 hand-rolled ticket sites in field_v.cpp predate (see the
 
 ## docstr.h regeneration
 
-DONE 2026-09-02, committed at 0cba523f (an earlier revision of this
-paragraph said the file sat uncommitted; it was committed the same day).
-REGENERATED AGAIN 2026-09-03 over the ported P1-P8 headers (same recipe,
-same determinism check -- two runs byte-identical, zero fatals). That
-second diff was exactly the port's own header surface (new RayMask
-values, Shape/Scene/MergeKey/InstanceEntry/SurfaceInteraction/
-RayDifferential additions, the rewritten BSDFSample3::
-sampled_roughness_squared entry) with no identifier removed; the four
-bindings that had carried literal docstrings pending the regen now
-reference `D(...)`.
+CURRENT as of the P9 + kd-tree-fix headers (regenerated 2026-09-03, same
+recipe, same determinism check -- two runs byte-identical, zero fatals,
+the same ~23 tolerated non-fatal drjit template errors). That diff was
+exactly 2 hunks, both the port's own header surface, no identifier added
+or removed: `Sampler::current_sample_index` (P9 made it public and
+carried the fork's expanded doc comment -- wavefront lane/pass indexing,
+why it is public) and `Shape::ray_intersect_preliminary_scalar` (the
+kd-tree prim-index fix 88fd5037 documented the new `prim_index`
+argument). Neither entry is referenced by any Python binding. Earlier
+regens: first DONE 2026-09-02 at 0cba523f; regenerated over the P1-P8
+headers 2026-09-03 at f00ad838 (that diff was the P1-P8 header surface
+-- RayMask values, Shape/Scene/MergeKey/InstanceEntry/
+SurfaceInteraction/RayDifferential additions, the rewritten BSDFSample3::
+sampled_roughness_squared entry -- with no identifier removed; the four
+bindings that had carried literal docstrings switched to `D(...)`).
 Replicated the CMake `docstrings` target by hand: `resources/mkdocs.py`
 run with the built env's python plus nix-provided clang bits
 (`python3Packages.clang` 21.1.8 for `clang.cindex`, `LIBCLANG_PATH` →
