@@ -127,6 +127,19 @@ public:
     /// Set the number of samples per pixel per pass in wavefront modes (default is 1)
     void set_samples_per_wavefront(uint32_t samples_per_wavefront);
 
+    /**
+     * \brief Return the 0-based index of the current sample, per lane.
+     *
+     * In scalar mode this is simply how often \ref advance() has run since the
+     * last \ref seed(). In wavefront modes every sample of a pixel is its own
+     * lane of one launch, so the index combines the in-wavefront offset with
+     * the pass counter: <tt>m_sample_index * samples_per_wavefront +
+     * lane % samples_per_wavefront</tt>. Public because a consistent
+     * (sample-index-dependent) integrator needs it -- see the \c path plugin's
+     * regularization -- not only the samplers themselves.
+     */
+    UInt32 current_sample_index() const;
+
     /// dr::schedule() variables that represent the internal sampler state
     virtual void schedule_state();
 
@@ -139,8 +152,6 @@ protected:
 
     /// Generates a array of seeds where the seed values are unique per sequence
     UInt32 compute_per_sequence_seed(UInt32 seed) const;
-    /// Return the index of the current sample
-    UInt32 current_sample_index() const;
 
 protected:
     /// Base seed value

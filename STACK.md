@@ -104,6 +104,13 @@ include/mitsuba/python/python.h.
 
 ## Python test suite
 
+Re-run 2026-09-03 on the P9 (path-space regularization) port, same harness:
+**36 failed, 3470 passed, 238 skipped** -- failure set again identical to the
+four triaged rows below. P9's test_regularization.py accounts for +15 of the
++16 passes over the figure recorded below; a same-day independent run of the
+P1-P8 build counted 3455 passed, consistent with exactly +15, so the one-test
+discrepancy is between the two P1-P8 counts, not a P9 effect.
+
 Re-run 2026-09-03 on the completed P1-P8 port (same harness): **36 failed,
 3454 passed, 238 skipped**. The failure set is IDENTICAL to the 2026-09-02
 baseline below -- every entry matches one of the four triaged rows, none is
