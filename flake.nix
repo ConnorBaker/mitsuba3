@@ -98,6 +98,12 @@
           packages = {
             default = pkgs.python3Packages.mitsuba;
             mitsuba = pkgs.python3Packages.mitsuba;
+            # EXPERIMENTAL measurement build: identical to `mitsuba` except
+            # MI_ENABLE_EMBREE=true (vendored ext/embree as the scalar-variant
+            # CPU ray-tracing backend). Exists to quantify the Embree-on vs
+            # native-kd-tree test-suite delta (see STACK.md); it is NOT the
+            # supported configuration and nothing should depend on it.
+            mitsuba-embree = pkgs.python3Packages.mitsuba.override { enableEmbree = true; };
             drjit = pkgs.python3Packages.drjit;
             nanobind3 = pkgs.python3Packages.nanobind3;
             nanobind-backend = pkgs.python3Packages.nanobind-backend;
