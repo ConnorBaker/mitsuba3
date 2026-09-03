@@ -849,6 +849,17 @@ public:
      */
     uint32_t visibility_mask() const;
 
+    /**
+     * Does this shape carry texture attributes (`Field` children attached at
+     * construction time)?
+     *
+     * Relevant to `Mesh.merge()`: these live on the Shape rather than in the
+     * mesh data, so a rebuilt merged mesh would silently lose them.
+     */
+    bool has_texture_attributes() const {
+        return !m_texture_attributes.empty();
+    }
+
     /// Is this shape also an area sensor?
     bool is_sensor() const { return (bool) m_sensor; }
 

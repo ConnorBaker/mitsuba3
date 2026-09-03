@@ -10,6 +10,7 @@
 #include <drjit-core/hash.h>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -76,10 +77,29 @@ struct MergeKey {
      */
     Layout layout;
 
+    /**
+     * The shape's `Shape.visibility_mask()` (Blender-style per-object ray
+     * visibility). A merged mesh carries ONE mask, so merging shapes that
+     * disagree in it would silently change what some rays can see -- the
+     * exact defect class every other field here exists to prevent.
+     */
+    uint32_t visibility_mask = 0xFFu;
+
+    /**
+     * The shape's silhouette sampling weight. `Mesh.merge()` rebuilds the
+     * fused mesh from a `Properties`, so a weight the key did not separate on
+     * would silently revert to the 1.0 default, re-weighting silhouette
+     * sampling in differentiable renders. Exact float equality is the right
+     * test: the values compared were parsed from the same scene description.
+     */
+    float silhouette_sampling_weight = 1.f;
+
     bool operator==(const MergeKey &k) const {
         return bsdf == k.bsdf && emitter == k.emitter && sensor == k.sensor &&
                interior_medium == k.interior_medium &&
-               exterior_medium == k.exterior_medium && layout == k.layout;
+               exterior_medium == k.exterior_medium && layout == k.layout &&
+               visibility_mask == k.visibility_mask &&
+               silhouette_sampling_weight == k.silhouette_sampling_weight;
     }
 
     bool operator!=(const MergeKey &k) const { return !operator==(k); }
@@ -89,6 +109,10 @@ struct MergeKey {
 struct MergeKeyHasher {
     size_t operator()(const MergeKey &k) const {
         uint64_t h = (uint64_t) k.layout;
+        h = fmix64(h ^ (uint64_t) k.visibility_mask);
+        uint32_t w_bits;
+        std::memcpy(&w_bits, &k.silhouette_sampling_weight, sizeof(float));
+        h = fmix64(h ^ (uint64_t) w_bits);
         for (const Object *p : { k.bsdf, k.emitter, k.sensor,
                                  k.interior_medium, k.exterior_medium })
             h = fmix64(h ^ (uintptr_t) p);

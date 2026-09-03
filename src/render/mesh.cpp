@@ -1386,7 +1386,25 @@ MI_VARIANT void Mesh<Float, Spectrum>::build_pmf() {
             return dr::detach(.5f * dr::norm(dr::cross(p1 - p0, p2 - p0)));
         });
 
-    m_area_pmf = DiscreteDistribution<Float>(std::move(area));
+    /* HSR (drjit-core #211): building the CDF on the device runs
+       dr::prefix_sum over a float array, which is bit-NONDETERMINISTIC from
+       ~16k elements on the CUDA backend (measured on the fork's pin by
+       the HSR repo's test/regression/_cuda_prefix_sum_determinism: 10/10
+       distinct bit patterns at 32768 on identical input, integer control
+       clean). A mesh area emitter's sampling CDF built that way pins
+       different render bytes on identical scenes. The CDF is built ONCE at
+       load, so determinism is bought where it is cheap: read the areas back
+       and use the scalar constructor, whose serial double-precision
+       accumulation is deterministic by construction. AD is unaffected --
+       this path always detached the areas. */
+    if constexpr (dr::is_jit_v<Float>) {
+        dr::eval(area);
+        auto &&area_host = dr::migrate(area, JitBackend::None);
+        dr::sync_thread();
+        m_area_pmf = DiscreteDistribution<Float>(area_host.data(), m_face_count);
+    } else {
+        m_area_pmf = DiscreteDistribution<Float>(std::move(area));
+    }
 }
 
 MI_VARIANT const typename Mesh<Float, Spectrum>::DirectedEdge *
@@ -1460,7 +1478,8 @@ Mesh<Float, Spectrum>::sil_dedge_pmf() const {
 MI_VARIANT MergeKey Mesh<Float, Spectrum>::merge_key() const {
     return { m_bsdf.get(), m_emitter.get(), m_sensor.get(),
              m_interior_medium.get(), m_exterior_medium.get(),
-             (Layout) (m_layout & ~Layout::FaceBSDFs) };
+             (Layout) (m_layout & ~Layout::FaceBSDFs),
+             visibility_mask(), m_silhouette_sampling_weight };
 }
 
 MI_VARIANT
@@ -1493,7 +1512,8 @@ Mesh<Float, Spectrum>::merge(const std::vector<Shape<Float, Spectrum> *> &shapes
     parts.reserve(meshes.size());
 
     for (const Mesh *m : meshes) {
-        if (m->merge_key() != key || m->has_mesh_attributes())
+        if (m->merge_key() != key || m->has_mesh_attributes() ||
+            m->has_texture_attributes())
             Throw("Mesh::merge(): the meshes are incompatible (%s and %s)!",
                   first->to_string(), m->to_string());
 
@@ -1627,9 +1647,20 @@ Mesh<Float, Spectrum>::merge(const std::vector<Shape<Float, Spectrum> *> &shapes
     set_object("sensor", first->m_sensor.get());
     set_object("emitter", first->m_emitter.get());
     props.set("face_normals", first->has_face_normals());
+    props.set("silhouette_sampling_weight",
+              (double) first->m_silhouette_sampling_weight);
 
     ref<Mesh> result = new Mesh(props);
     result->m_filename = filename;
+
+    /* The Blender-style ray-visibility mask has no `Properties` spelling of
+       its own (it is parsed from the individual `visible_*` flags), so it must
+       be carried over directly -- otherwise the merged mesh reverts to
+       RayMask::All even when every input agreed on a narrower mask, and a
+       `visible_shadow = false` pane silently begins casting shadows as soon as
+       it fuses with a second pane. The merge key separates on the mask, so the
+       first input's value speaks for all of them. */
+    result->m_visibility_mask = first->m_visibility_mask;
 
     Layout layout = first->m_layout;
     if (any_bsdf)
