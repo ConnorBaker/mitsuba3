@@ -942,7 +942,60 @@ static const char *__doc_mitsuba_BSDFSample3_pdf = R"doc(Probability density at 
 
 static const char *__doc_mitsuba_BSDFSample3_sampled_component = R"doc(Stores the component index that was sampled by `BSDF.sample()`)doc";
 
-static const char *__doc_mitsuba_BSDFSample3_sampled_roughness_squared = R"doc(Squared microfacet roughness of the lobe that was sampled, or zero when the BSDF did not report one. Zero is the "not reported" sentinel; a delta lobe is identified from sampled_type, and a non-delta lobe that reports nothing is read as fully rough (1), which is what Cycles does for a non-microfacet closure.)doc";
+static const char *__doc_mitsuba_BSDFSample3_sampled_roughness_squared =
+R"doc(\brief Squared microfacet roughness of the lobe that was sampled, or
+       zero when the BSDF did not report one.
+
+This exists so that an integrator can widen a ray differential after a
+non-specular bounce, which is what makes a texture footprint meaningful
+past the camera hit. Cycles derives the same quantity in
+\c bsdf_get_specular_roughness_squared
+(\c intern/cycles/kernel/closure/bsdf.h) and feeds it to
+\c bsdf_widen_dD, whose rule is
+\c dD' = max(dD, sqrt(avg_roughness_squared)).
+
+Cycles has three cases and only the middle one needs a plugin's
+cooperation:
+
+<ul>
+<li>a singular closure contributes 0. A reader gets this from
+    \c sampled_type -- a delta lobe is already flagged there -- so a
+    specular BSDF need not touch this field.</li>
+<li>a microfacet closure contributes \c alpha_x * alpha_y. Nothing else
+    knows that number, so a microfacet BSDF must report it here.</li>
+<li>anything else contributes 1, which is also what a reader should
+    assume for a non-delta lobe that reports nothing. That is Cycles'
+    own \c else branch, not a fallback invented here.</li>
+</ul>
+
+ZERO IS THE "NOT REPORTED" SENTINEL, deliberately, and a negative one
+would be a bug: plugins build their sample by
+\c dr::zeros<BSDFSample3f>(), through the \c wo constructor below, and
+through the DEFAULT constructor, so any sentinel that
+zero-initialization cannot produce would be reachable from only some of
+those paths and would mean different things depending on which a plugin
+happened to use. Zero is safe from all three, and it does not collide
+with a real value because a microfacet lobe whose alpha is genuinely
+zero is a delta lobe and is flagged as one.
+
+The default member initializer is load-bearing, not decoration. The
+default constructor initializes nothing else in this struct -- every
+other field is left empty for the caller to fill -- and that is fine for
+a field every plugin assigns. This one is NOT assigned by plugins that
+predate it, and an unassigned \c Float is an EMPTY Dr.Jit array, not a
+zero. Adding this field to \c DRJIT_STRUCT without the initializer made
+every Python BSDF that builds its sample as \c mi.BSDFSample3f() -- the
+\c translucent and \c refraction plugins both do -- return a struct with
+one empty member, which \c ad_call rejects outright:
+"callable N returned an empty/uninitialized Dr.Jit array". That took out
+whole-scene renders that had nothing to do with roughness. A field added
+to a traversed struct has to be valid from EVERY construction path that
+already exists, not only the ones its author updated.
+
+The one consequence worth stating plainly: a MICROFACET BSDF that
+leaves this unset is read as fully rough, which over-widens the
+differential for a near-mirror lobe. It is not silently wrong for
+anything else.)doc";
 
 static const char *__doc_mitsuba_BSDFSample3_sampled_type = R"doc(Stores the component type that was sampled by `BSDF.sample()`)doc";
 
@@ -4986,6 +5039,13 @@ static const char *__doc_mitsuba_InstanceEntry_instance_index = R"doc(Index + 1 
 
 static const char *__doc_mitsuba_InstanceEntry_to_world = R"doc(Column-major 3x4 affine, identity for a top-level BLAS.)doc";
 
+static const char *__doc_mitsuba_InstanceEntry_visibility_mask =
+R"doc(Effective 8-bit visibility mask for this TLAS/IAS entry: the BLAS mask
+for top-level geometry, AND-combined with the owning ``instance``
+shape's mask for instanced geometry. Blender's per-object switches
+belong to the OBJECT (the instance); the shared mesh data inside a
+ShapeGroup ordinarily carries ``RayMask::All``.)doc";
+
 static const char *__doc_mitsuba_Integrator =
 R"doc(Abstract integrator base class, which does not make any assumptions
 with regards to how radiance is computed.
@@ -5969,6 +6029,19 @@ static const char *__doc_mitsuba_MergeKey_operator_eq = R"doc()doc";
 static const char *__doc_mitsuba_MergeKey_operator_ne = R"doc()doc";
 
 static const char *__doc_mitsuba_MergeKey_sensor = R"doc()doc";
+
+static const char *__doc_mitsuba_MergeKey_silhouette_sampling_weight =
+R"doc(The shape's silhouette sampling weight. `Mesh.merge()` rebuilds the
+fused mesh from a `Properties`, so a weight the key did not separate on
+would silently revert to the 1.0 default, re-weighting silhouette
+sampling in differentiable renders. Exact float equality is the right
+test: the values compared were parsed from the same scene description.)doc";
+
+static const char *__doc_mitsuba_MergeKey_visibility_mask =
+R"doc(The shape's `Shape.visibility_mask()` (Blender-style per-object ray
+visibility). A merged mesh carries ONE mask, so merging shapes that
+disagree in it would silently change what some rays can see -- the
+exact defect class every other field here exists to prevent.)doc";
 
 static const char *__doc_mitsuba_Mesh =
 R"doc(Triangle mesh
@@ -8896,7 +8969,20 @@ static const char *__doc_mitsuba_RayDifferential_d_x = R"doc()doc";
 
 static const char *__doc_mitsuba_RayDifferential_d_y = R"doc()doc";
 
-static const char *__doc_mitsuba_RayDifferential_diff_scale = R"doc()doc";
+static const char *__doc_mitsuba_RayDifferential_diff_scale =
+R"doc(\brief Cumulative factor already applied by \ref scale_differential().
+
+The sensor emits a ONE-PIXEL differential, but \c SamplingIntegrator::render()
+immediately shrinks it by \c rsqrt(spp) so that a stochastic average over the
+pixel's samples reconstructs a pixel-wide filter. That is exactly right for a
+LINEAR consumer -- a mip-mapped texture lookup -- and exactly wrong for a
+non-linear one, because the mean of N perturbed shading normals is not the normal
+you get from perturbing once over the whole pixel.
+
+Recording the factor is what lets such a consumer ask for the quantity it actually
+needs. Dividing a differential-derived quantity by \c diff_scale recovers the
+one-pixel footprint, which is what Cycles carries unconditionally (its \c ray->dP
+does not depend on the sample count at all).)doc";
 
 static const char *__doc_mitsuba_RayDifferential_fields = R"doc()doc";
 
@@ -8987,13 +9073,31 @@ of `Scene` accept a ray-side counterpart. A shape can only be intersected
 when the bitwise AND of the two masks is nonzero.
 
 Mitsuba uses this mechanism to hide emitters from directly visible
-(i.e., camera) rays. Integrators trace such rays with `RayMask.Camera`
-and use `RayMask.All` everywhere else. The remaining bits are currently
-unused.)doc";
+(i.e., camera) rays, and -- through the Blender-style ``visible_camera`` /
+``visible_diffuse`` / ``visible_glossy`` / ``visible_transmission`` /
+``visible_volume_scatter`` / ``visible_shadow`` shape properties -- to give
+every shape Blender's per-object "Ray Visibility" switches. Integrators
+trace each ray with the bit(s) describing the event that spawned it.
+
+The bit set mirrors Cycles' own (``intern/cycles/kernel/types.h``), and so
+does the matching rule: the test is a nonzero AND, so a ray carrying several
+bits (Cycles ORs ``TRANSMIT`` on top of ``DIFFUSE``/``GLOSSY``) is blocked
+only by a shape that hides ALL of them. `RayMask.All` is the default on both
+sides, under which every code path reduces exactly to the unmasked one.)doc";
 
 static const char *__doc_mitsuba_RayMask_All = R"doc(Default ray mask, matched by every shape)doc";
 
 static const char *__doc_mitsuba_RayMask_Camera = R"doc(Matched by all shapes except emitters marked as invisible)doc";
+
+static const char *__doc_mitsuba_RayMask_Diffuse = R"doc(Rays continuing after a diffuse scattering event)doc";
+
+static const char *__doc_mitsuba_RayMask_Glossy = R"doc(Rays continuing after a glossy/specular reflection)doc";
+
+static const char *__doc_mitsuba_RayMask_Shadow = R"doc(Shadow rays, i.e. the occlusion test of next-event estimation)doc";
+
+static const char *__doc_mitsuba_RayMask_Transmission = R"doc(Rays continuing after a transmission event)doc";
+
+static const char *__doc_mitsuba_RayMask_VolumeScatter = R"doc(Rays continuing after a scattering event inside a participating medium)doc";
 
 static const char *__doc_mitsuba_Ray_Ray = R"doc(Construct a new ray (o, d) at time ``time``)doc";
 
@@ -9565,6 +9669,21 @@ Returns:
     The incident radiance and discrete or solid angle density of the
     sample.)doc";
 
+static const char *__doc_mitsuba_Scene_has_null_bsdfs =
+R"doc(\brief Does any shape in the scene carry a BSDF with a ``Null`` lobe?
+
+A ``null`` boundary -- Blender's Transparent BSDF, and the pass-through half of
+``mask`` -- is invisible to a *scattering* path, but \ref ray_test() is a pure
+occlusion query and reports it as a hit like any other. An integrator that tests
+shadow-ray visibility with \ref ray_test() therefore treats a pane of clear glass
+as a wall: next-event estimation dies behind it, and -- worse than merely dark --
+the BSDF-sampled hit on that same emitter is still MIS-weighted as though NEE had
+contributed its half, so the result is biased LOW rather than only noisier.
+
+Integrators use this to decide whether the shadow ray must be MARCHED through null
+boundaries instead. It is \c false for the overwhelming majority of scenes, which
+therefore keep the single fast \ref ray_test() and pay nothing for the feature.)doc";
+
 static const char *__doc_mitsuba_Scene_instance = R"doc(Return the ``instance`` shape with the given index.)doc";
 
 static const char *__doc_mitsuba_Scene_integrator = R"doc(Return the scene's `Integrator`)doc";
@@ -9606,6 +9725,8 @@ static const char *__doc_mitsuba_Scene_m_emitters = R"doc()doc";
 static const char *__doc_mitsuba_Scene_m_emitters_dr = R"doc()doc";
 
 static const char *__doc_mitsuba_Scene_m_environment = R"doc()doc";
+
+static const char *__doc_mitsuba_Scene_m_has_null_bsdfs = R"doc(\see has_null_bsdfs())doc";
 
 static const char *__doc_mitsuba_Scene_m_instance_transforms = R"doc(Flattened sequence of instance ``to_world`` matrices (12 floats each))doc";
 
@@ -10841,6 +10962,13 @@ Args:
 
 static const char *__doc_mitsuba_Shape_has_flipped_normals = R"doc(Does this shape have flipped normals?)doc";
 
+static const char *__doc_mitsuba_Shape_has_texture_attributes =
+R"doc(Does this shape carry texture attributes (`Field` children attached at
+construction time)?
+
+Relevant to `Mesh.merge()`: these live on the Shape rather than in the
+mesh data, so a rebuilt merged mesh would silently lose them.)doc";
+
 static const char *__doc_mitsuba_Shape_initialize = R"doc()doc";
 
 static const char *__doc_mitsuba_Shape_interior_medium = R"doc(Return the medium that lies on the interior of this shape)doc";
@@ -10894,11 +11022,23 @@ static const char *__doc_mitsuba_Shape_m_sensor = R"doc()doc";
 
 static const char *__doc_mitsuba_Shape_m_shape_type = R"doc()doc";
 
-static const char *__doc_mitsuba_Shape_m_silhouette_sampling_weight = R"doc(Sampling weight (proportional to scene))doc";
+static const char *__doc_mitsuba_Shape_m_silhouette_sampling_weight =
+R"doc(Sampling weight (proportional to scene)
+
+The in-class initializer matters: the ``Shape()`` default constructor
+(used by the direct ``Mesh(name, ...)`` construction path, which never
+sees a ``Properties``) otherwise leaves this uninitialized, and
+``Mesh::merge_key()`` compares it -- merging meshes built that way then
+fails on garbage inequality.)doc";
 
 static const char *__doc_mitsuba_Shape_m_texture_attributes = R"doc()doc";
 
 static const char *__doc_mitsuba_Shape_m_to_world = R"doc()doc";
+
+static const char *__doc_mitsuba_Shape_m_visibility_mask =
+R"doc(Blender-style per-object ray visibility (see `RayMask`), parsed from
+the ``visible_*`` shape properties; `RayMask::All` unless the scene
+says otherwise. Combined with the emitter's mask in visibility_mask().)doc";
 
 static const char *__doc_mitsuba_Shape_mark_as_instance = R"doc()doc";
 
@@ -11193,8 +11333,9 @@ R"doc(Return the shape's 8-bit visibility mask (see `RayMask`)
 
 A ray can only intersect this shape when the bitwise AND of its
 ray-side mask and this value is nonzero. Ordinary shapes match every
-ray. Shapes with an attached emitter return its
-`Emitter.visibility_mask()`.)doc";
+ray. The value combines the shape's own Blender-style ``visible_*``
+properties with the attached emitter's `Emitter.visibility_mask()`
+(an emitter marked invisible clears the `RayMask.Camera` bit).)doc";
 
 static const char *__doc_mitsuba_SilhouetteSample =
 R"doc(Data structure holding the result of visibility silhouette sampling
@@ -11889,6 +12030,29 @@ static const char *__doc_mitsuba_SurfaceInteraction_is_medium_transition = R"doc
 static const char *__doc_mitsuba_SurfaceInteraction_is_sensor = R"doc(Is the intersected shape also a sensor?)doc";
 
 static const char *__doc_mitsuba_SurfaceInteraction_labels = R"doc()doc";
+
+static const char *__doc_mitsuba_SurfaceInteraction_min_alpha =
+R"doc(\brief Lower bound on microfacet roughness imposed by the path so far
+       ("filter glossy").
+
+Zero -- the default, and what \c dr::zeros produces -- disables the
+mechanism entirely, so a scene that never sets it renders exactly as
+before. When positive, a microfacet BSDF evaluated at this interaction
+must widen its roughness to at least this value:
+\c alpha = max(alpha, min_alpha).
+
+This mirrors Cycles, which blurs the closures it has just allocated for
+a shade point when the path that arrived there was improbable -- see
+\c intern/cycles/kernel/integrator/surface_shader.h, where
+\c blur_pdf = filter_glossy * min_ray_pdf and, for \c blur_pdf < 1,
+\c blur_roughness = sqrt(1 - blur_pdf) * 0.5 is handed to \c bsdf_blur.
+The value belongs on the interaction rather than on \ref BSDFContext
+because it varies per lane, and \ref BSDFContext is a scalar POD shared
+by every lane of a vectorized call.
+
+Note this is a deliberately BIASED variance-reduction heuristic: it
+trades correctness for a large reduction in caustic noise. It exists
+here to reproduce Cycles, not because it is unbiased.)doc";
 
 static const char *__doc_mitsuba_SurfaceInteraction_name = R"doc()doc";
 
@@ -13441,6 +13605,18 @@ static const char *__doc_mitsuba_filesystem_resize_file =
 R"doc(Changes the size of the regular file named by ``p`` as if
 ``truncate`` was called. If the file was larger than ``target_length``,
 the remainder is discarded. The file must exist.)doc";
+
+static const char *__doc_mitsuba_filter_glossy_alpha =
+R"doc(\brief Raise a microfacet roughness to the floor this interaction carries.
+
+This is the read side of Cycles' "filter glossy": the path integrator records how
+improbable the path reaching \c si was, converts that to a roughness in
+\ref SurfaceInteraction::min_alpha, and every microfacet lobe widens to at least that
+much -- \c bsdf_microfacet_blur in \c intern/cycles/kernel/closure/bsdf_microfacet.h
+does the same \c alpha = max(roughness, alpha) on the closure it has allocated.
+
+\c min_alpha is zero unless the integrator set it, so this is the identity for every
+scene that does not enable the mechanism.)doc";
 
 static const char *__doc_mitsuba_frame_decode = R"doc(Decode a frame produced by `frame_encode()` into normal and tangent)doc";
 
