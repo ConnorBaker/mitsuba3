@@ -5,6 +5,23 @@ import drjit as dr
 import gc
 
 
+def _prev_float(v: mi.Vector2f) -> mi.Vector2f:
+    """Largest representable value strictly below `v` (``dr::prev_float``).
+
+    Dr.Jit exposes ``prev_float`` in C++ only, so spell it out here; the bit
+    manipulation is the same one ``ext/drjit/include/drjit/array_router.h``
+    performs.  Only the finite, non-NaN branch is needed: the caller passes
+    ``pos + 1`` for an integral film coordinate.
+    """
+    Int = dr.int32_array_t(type(v))
+    i = dr.reinterpret_array(Int, v)
+    j = i + dr.select(i >= 0, Int(-1), Int(1))
+    # -0.0 has no predecessor by the rule above; +0.0's is the largest negative
+    # denormal (0x80000001).
+    j = dr.select(i == Int(0), Int(-2147483647), j)
+    return dr.reinterpret_array(type(v), j)
+
+
 class ADIntegrator(mi.CppADIntegrator):
     """
     Abstract base class of numerous differentiable integrators in Mitsuba
@@ -275,8 +292,23 @@ class ADIntegrator(mi.CppADIntegrator):
 
         pos += mi.Vector2i(film.crop_offset())
 
-        # Cast to floating point and add random offset
-        pos_f = mi.Vector2f(pos) + sampler.next_2d()
+        # Cast to floating point and add random offset.
+        #
+        # `pos` names the film pixel that will RECEIVE this sample, so the
+        # jittered position has to stay inside it: floor(pos_f) == pos.  In exact
+        # arithmetic `pos + u` with u in [0, 1) does, but the sum is formed in
+        # single precision, and once the ULP at `pos` becomes comparable to
+        # `1 - u` it rounds UP to `pos + 1` -- while the box-filter branch below
+        # still splats at `pos`.  The sensor would then be handed a position
+        # naming a DIFFERENT film pixel than the one that receives the sample,
+        # which is fatal for any sensor whose per-pixel state (a CFA site, a
+        # per-pixel calibration) is recovered from `pos_adjusted`.  Clamping the
+        # sum strictly below `pos + 1` restores the invariant, and is a bit-level
+        # no-op for every sample that did not round up.  Mirrors the same clamp
+        # in `SamplingIntegrator::render_sample` (src/render/integrator.cpp).
+        pos_i_f = mi.Vector2f(pos)
+        pos_f = dr.minimum(pos_i_f + sampler.next_2d(),
+                           _prev_float(pos_i_f + 1.0))
 
         # Re-scale the position to [0, 1]^2
         scale = dr.rcp(mi.ScalarVector2f(film.crop_size()))
