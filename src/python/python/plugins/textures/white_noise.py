@@ -29,7 +29,7 @@ class WhiteNoise(TextureBase):
             raise Exception("white_noise: `channel` must be 'fac' or 'color', got '%s'"
                             % self.channel)
         self.vector = None
-        if 'vector' in [str(k) for k in props.property_names()]:
+        if 'vector' in [str(k) for k in props.keys()]:
             self.vector = props.get_unbounded_texture('vector', 0.0)
         self.w = props.get_unbounded_texture('w', 0.0)
 
