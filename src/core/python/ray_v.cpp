@@ -76,10 +76,24 @@ MI_PY_EXPORT(Ray) {
             .def_field(RayDifferential3f, o_y, D(RayDifferential, o_y))
             .def_field(RayDifferential3f, d_x, D(RayDifferential, d_x))
             .def_field(RayDifferential3f, d_y, D(RayDifferential, d_y))
-            .def_field(RayDifferential3f, has_differentials, D(RayDifferential, has_differentials));
+            .def_field(RayDifferential3f, has_differentials, D(RayDifferential, has_differentials))
+            // Literal docstring until the next docstr.h regeneration.
+            .def_field(RayDifferential3f, diff_scale,
+                       "Cumulative factor applied by scale_differential(). Dividing a "
+                       "differential-derived quantity by it recovers the one-pixel "
+                       "footprint (render() shrinks the sensor's differential by "
+                       "rsqrt(spp)).");
 
+        // `diff_scale` belongs in the DRJIT_STRUCT field list, not merely in the property
+        // list: the C++ `DRJIT_STRUCT` in `core/ray.h` already traverses it, and the two
+        // must agree. While they did not, any Python-side struct traversal of a
+        // `RayDifferential3f` -- `dr.select`, a gather, or the loop state of a
+        // `dr.while_loop`, which is exactly how a Python integrator carries a ray -- dropped
+        // the field and silently reset it to 1. A consumer that divides by `diff_scale` to
+        // recover the one-pixel footprint would then get the `rsqrt(spp)`-shrunk footprint
+        // back with no error anywhere, which is the failure this field exists to prevent.
         MI_PY_DRJIT_STRUCT(raydiff, RayDifferential3f, o, d, maxt, time,
-                            wavelengths, o_x, o_y, d_x, d_y)
+                            wavelengths, o_x, o_y, d_x, d_y, diff_scale)
     }
 
     nb::implicitly_convertible<Ray3f, RayDifferential3f>();

@@ -257,7 +257,7 @@ public:
 
         dr::tie(ls) = dr::while_loop(dr::make_tuple(ls),
             [](const LoopState& ls) { return ls.active; },
-            [this, scene, bsdf_ctx](LoopState& ls) {
+            [this, scene, bsdf_ctx, &ray_](LoopState& ls) {
 
             // dr::while_loop implicitly masks all code in the loop using the
             // 'active' flag, so there is no need to pass it to every function
@@ -265,6 +265,62 @@ public:
             // Fill out all information of the interaction
             SurfaceInteraction3f si = scene->compute_surface_interaction(
                 ls.ray, ls.pi, +RayFlags::Default);
+
+            /* UV PARTIALS -- the screen-space texture footprint, which Cycles' Bump node
+               differences the height field over (`dP.dx`, `dP.dy` in
+               `kernel/svm/displace.h`). Two separate defects had to be fixed here, and the
+               second is invisible until the first is gone.
+
+               (1) NOBODY WAS COMPUTING THEM. Mitsuba declares `si.duv_dx` / `si.duv_dy` but
+               leaves them ZERO unless somebody calls `compute_uv_partials`; nothing in the
+               `path` integrator did, so the `bump` texture plugin fell back to differencing
+               over one TEXEL. A texel is the same size however many pixels cover it, so
+               Mitsuba's bump was flat in render resolution while Cycles' moved 35% across a
+               40/80/160/320 px ladder -- bump is a screen-space effect there by design.
+
+               (2) THE FOOTPRINT IS PER-SAMPLE, NOT PER-PIXEL. `SamplingIntegrator::render`
+               applies `ray.scale_differential(rsqrt(spp))`, so each sample carries 1/sqrt(N)
+               of a pixel. For a LINEAR consumer -- a mip-mapped texture lookup -- that is
+               exactly right: the stochastic average over the pixel's N samples reconstructs
+               a pixel-wide filter. Bump is not linear in the footprint (the mean of N
+               perturbed normals is not the normal from one pixel-wide perturbation), so the
+               average does not reconstruct it, and Cycles does not do this at all -- its
+               `ray->dP` is the full pixel footprint whatever the sample count.
+
+               Measured, `Fabric Sofa`, sphere-centre mean at 80 px, Mitsuba/Cycles, with the
+               Cycles arm held at 512 spp as a control (its spread over the sweep: 0.000000):
+
+                   mi spp     1     4      16     64     256    1024
+                   mi/cy   1.0998 0.9487 0.7996 0.7432 0.6720 0.6800
+
+               The ratio tracks `rsqrt(spp)` down and saturates once the footprint falls well
+               below a texel. At spp = 1, where the scale factor is 1 and the two footprints
+               are by definition identical, it is 1.0998 -- so this scaling is the whole of
+               the resolution-tracking defect and about 30 points of the level error.
+
+               Dividing by `ray_.diff_scale` therefore recovers the one-pixel footprint. Note
+               this makes `si.duv_dx` / `si.duv_dy` mean PIXEL footprint here, not sample
+               footprint; that is safe because nothing else in the renderer reads them (they
+               are written by `compute_uv_partials` and consumed only by plugins that ask),
+               and it is what a Cycles-matching shading graph needs.
+
+               ONLY THE FIRST VERTEX. `ray_` carries differentials; `ls.ray` is a plain
+               `Ray3f` and every ray spawned inside the loop is too, so there is nothing to
+               propagate past the camera hit. Cycles does carry one: a compact SCALAR radius
+               `sd->dP`, transferred as `dP + t*dD` and widened on each bounce by
+               `dD' = max(dD, sqrt(avg_roughness^2))` (`bsdf_widen_dD`). We do not, and the
+               fallback in the `bump` plugin covers the remaining vertices. Recorded as a
+               known residual rather than hidden: bump seen through a mirror or a rough
+               bounce is still differenced at texel scale. */
+            if (dr::any_or<true>(ls.depth == 0u)) {
+                SurfaceInteraction3f si_d(si);
+                si_d.compute_uv_partials(ray_);
+                Float inv_ds = dr::select(ray_.diff_scale > 0.f,
+                                          dr::rcp(ray_.diff_scale), Float(1.f));
+                Mask first = ls.active && (ls.depth == 0u);
+                dr::masked(si.duv_dx, first) = si_d.duv_dx * inv_ds;
+                dr::masked(si.duv_dy, first) = si_d.duv_dy * inv_ds;
+            }
 
             /* Filter glossy: hand this shade point the roughness floor implied by how
                improbable the path that reached it was. Cycles does the same thing at the
