@@ -445,7 +445,19 @@ SamplingIntegrator<Float, Spectrum>::render_sample(const Scene *scene,
     const bool has_alpha = has_flag(film->flags(), FilmFlags::Alpha);
     const bool box_filter = film->rfilter()->is_box_filter();
 
-    Vector2f sample_pos   = pos + sampler->next_2d(active),
+    /* `pos` names the film pixel that will RECEIVE this sample, so the jittered
+       position has to stay inside it: `floor(sample_pos) == pos`.  In exact
+       arithmetic `pos + u` with `u` in [0, 1) does, but the sum is formed in
+       `Float`, and once the ULP at `pos` becomes comparable to `1 - u` it rounds
+       UP to `pos + 1`.  The box-filter branch of `block->put()` below still
+       deposits at `pos`, so the sensor is handed a position naming a DIFFERENT
+       film pixel than the one that receives the sample -- fatal for any sensor
+       whose per-pixel state (a CFA site, a per-pixel calibration) is recovered
+       from `adjusted_pos`.  Clamping the sum strictly below `pos + 1` restores
+       the invariant and is a bit-level no-op for every sample that did not round
+       up. */
+    Vector2f sample_pos   = dr::minimum(pos + sampler->next_2d(active),
+                                        dr::prev_float(pos + 1.f)),
              adjusted_pos = dr::fmadd(sample_pos, scale, offset);
 
     Point2f aperture_sample(.5f);
