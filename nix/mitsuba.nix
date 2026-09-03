@@ -63,6 +63,22 @@
 let
   src = ../.;
 
+  # CARRY THE VENDORED TREE'S ONE-LINE SERIALIZATION PATCH onto the stock
+  # pugixml this build links. Upstream's `ext/pugixml` is not pristine: in
+  # `node_output_start` it deletes the two lines that write pugixml's
+  # traditional space before an empty element's closing tag ("wenzel: removed
+  # this extra space before the closing tag"), so vendored builds emit `/>`
+  # where stock pugixml emits ` />`. Three upstream tests assert the `/>`
+  # form byte-for-byte (test_parser_writing::test06/test07,
+  # test_field::test01), and every mitsuba-written XML file changes shape
+  # without it -- the patch is behavior, not style, so unvendoring must
+  # preserve it. Scoped HERE rather than in overlay.nix: the overlay
+  # deliberately adds only new attribute names, and this must not leak a
+  # patched pugixml into consumers' unrelated packages.
+  pugixml' = pugixml.overrideAttrs (prevAttrs: {
+    patches = (prevAttrs.patches or [ ]) ++ [ ./pugixml-empty-tag-no-space.patch ];
+  });
+
   # The variant grammar, straight from `resources/mitsuba.conf.template`:
   # backend, then the optional `ad` feature (JIT backends only -- the template
   # defines no scalar_ad_* variants), then a color representation, then the
@@ -186,8 +202,9 @@ buildPythonPackage (finalAttrs: {
     # `lib/libpugixml.a`, so the result is a STATIC link -- `libmitsuba.so`
     # grows and no `libpugixml.so` is installed beside it, where the vendored
     # build shipped one. fast-float and tinyformat are header-only and
-    # contribute include paths only.
-    pugixml
+    # contribute include paths only. `pugixml'` (not the stock attr) carries
+    # the vendored tree's serialization patch -- see the note at `pugixml'`.
+    pugixml'
     fast-float
     tinyformat
   ];
@@ -258,7 +275,7 @@ buildPythonPackage (finalAttrs: {
         target_link_libraries(pugixml_shim INTERFACE pugixml::pugixml)' \
           --replace-fail \
             'set(PUGIXML_INCLUDE_DIRS ''${CMAKE_CURRENT_SOURCE_DIR}/pugixml/src PARENT_SCOPE)' \
-            'set(PUGIXML_INCLUDE_DIRS ${lib.getDev pugixml}/include PARENT_SCOPE)' \
+            'set(PUGIXML_INCLUDE_DIRS ${lib.getDev pugixml'}/include PARENT_SCOPE)' \
           --replace-fail \
             'set(TINYFORMAT_INCLUDE_DIRS ''${CMAKE_CURRENT_SOURCE_DIR}/tinyformat PARENT_SCOPE)' \
             'set(TINYFORMAT_INCLUDE_DIRS ${tinyformat}/include PARENT_SCOPE)' \
