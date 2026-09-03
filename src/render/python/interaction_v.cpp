@@ -52,11 +52,7 @@ MI_PY_EXPORT(SurfaceInteraction) {
         .def_field(SurfaceInteraction3f, wi,            D(SurfaceInteraction, wi))
         .def_field(SurfaceInteraction3f, prim_index,    D(SurfaceInteraction, prim_index))
         .def_field(SurfaceInteraction3f, instance_index, D(SurfaceInteraction, instance_index))
-        // Literal rather than `D(...)`: the docstring symbols in `docstr.h` are generated
-        // by mkdoc from the headers, and a freshly added field has no entry there yet.
-        .def_field(SurfaceInteraction3f, min_alpha,
-                   "Lower bound on microfacet roughness imposed by the path so far "
-                   "(Cycles' filter glossy). Zero disables it.")
+        .def_field(SurfaceInteraction3f, min_alpha, D(SurfaceInteraction, min_alpha))
 
         // Methods
         .def(nb::init<>(), D(SurfaceInteraction, SurfaceInteraction))

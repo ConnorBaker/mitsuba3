@@ -77,12 +77,7 @@ MI_PY_EXPORT(Ray) {
             .def_field(RayDifferential3f, d_x, D(RayDifferential, d_x))
             .def_field(RayDifferential3f, d_y, D(RayDifferential, d_y))
             .def_field(RayDifferential3f, has_differentials, D(RayDifferential, has_differentials))
-            // Literal docstring until the next docstr.h regeneration.
-            .def_field(RayDifferential3f, diff_scale,
-                       "Cumulative factor applied by scale_differential(). Dividing a "
-                       "differential-derived quantity by it recovers the one-pixel "
-                       "footprint (render() shrinks the sensor's differential by "
-                       "rsqrt(spp)).");
+            .def_field(RayDifferential3f, diff_scale, D(RayDifferential, diff_scale));
 
         // `diff_scale` belongs in the DRJIT_STRUCT field list, not merely in the property
         // list: the C++ `DRJIT_STRUCT` in `core/ray.h` already traverses it, and the two
