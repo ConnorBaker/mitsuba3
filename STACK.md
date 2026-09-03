@@ -35,7 +35,8 @@ the PR as-is. History stays intact one layer down in `pr/1885`.
 
 ## Build status
 
-COMPILES. `nix build '.?submodules=1#mitsuba'` from this branch builds all
+COMPILES, including the full P1-P8 feature port (see PORT_LOG.md).
+`nix build '.?submodules=1#mitsuba'` from this branch builds all
 three default variants (scalar_rgb, cuda_ad_rgb, cuda_ad_spectral) and the
 full fields plugin set, including the ported math plugin. The dependency
 triplet (drjit==1.6.0.dev1 at de73a6a2, nanobind==3.0.0 + nanobind-backend
@@ -48,7 +49,16 @@ the PR's 39 hand-rolled ticket sites in field_v.cpp predate (see the
 
 ## docstr.h regeneration
 
-DONE 2026-09-02 (regenerated file sits uncommitted in the working tree).
+DONE 2026-09-02, committed at 0cba523f (an earlier revision of this
+paragraph said the file sat uncommitted; it was committed the same day).
+REGENERATED AGAIN 2026-09-03 over the ported P1-P8 headers (same recipe,
+same determinism check -- two runs byte-identical, zero fatals). That
+second diff was exactly the port's own header surface (new RayMask
+values, Shape/Scene/MergeKey/InstanceEntry/SurfaceInteraction/
+RayDifferential additions, the rewritten BSDFSample3::
+sampled_roughness_squared entry) with no identifier removed; the four
+bindings that had carried literal docstrings pending the regen now
+reference `D(...)`.
 Replicated the CMake `docstrings` target by hand: `resources/mkdocs.py`
 run with the built env's python plus nix-provided clang bits
 (`python3Packages.clang` 21.1.8 for `clang.cindex`, `LIBCLANG_PATH` →
@@ -94,9 +104,25 @@ include/mitsuba/python/python.h.
 
 ## Python test suite
 
-Run 2026-09-02 against the built package (mitsuba 3.10.0.dev1, writable
+Re-run 2026-09-03 on the completed P1-P8 port (same harness): **36 failed,
+3454 passed, 238 skipped**. The failure set is IDENTICAL to the 2026-09-02
+baseline below -- every entry matches one of the four triaged rows, none is
+new -- and the ~170 added passes are the ported test files (P2 bsdf suites,
+P3 emitters, P4 specfilm/blackman_harris/texture_bitmap, P5/P6 integrator
+suites, P7 merge tests, P8 ray-differential scale). One test needed a
+port-side adaptation, found by this run and fixed in the same commit:
+upstream's `test_interaction::test02` asserts the exact
+SurfaceInteraction repr string, which now carries P2's `min_alpha` field
+(37th failure on the first pass; the expected string gained
+`min_alpha=0`). Two P7-exposed failures were found and fixed BEFORE this
+run at a524be12: upstream's `m_silhouette_sampling_weight` was
+uninitialized on the direct `Mesh(name, ...)` construction path, made
+load-bearing by the P7 MergeKey (test_mesh_build test13/test14).
+
+Baseline run 2026-09-02, pre-port (recorded for the triage table): built
+package mitsuba 3.10.0.dev1, writable
 overlay of the installed tree on PYTHONPATH, `util.py::find_resource` patched
-to walk up from cwd, executed from the repo root): **36 failed, 3284 passed,
+to walk up from cwd, executed from the repo root: **36 failed, 3284 passed,
 215 skipped in 527s**. All 36 failures triaged; **none is a port regression**
 -- every one is either a deliberate build-configuration consequence or a
 pre-existing upstream defect that the configuration exposes. Verdicts were
