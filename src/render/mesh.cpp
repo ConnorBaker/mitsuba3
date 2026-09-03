@@ -1479,7 +1479,7 @@ MI_VARIANT MergeKey Mesh<Float, Spectrum>::merge_key() const {
     return { m_bsdf.get(), m_emitter.get(), m_sensor.get(),
              m_interior_medium.get(), m_exterior_medium.get(),
              (Layout) (m_layout & ~Layout::FaceBSDFs),
-             visibility_mask(), m_silhouette_sampling_weight };
+             this->visibility_mask(), this->m_silhouette_sampling_weight };
 }
 
 MI_VARIANT
