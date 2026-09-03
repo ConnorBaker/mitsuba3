@@ -110,7 +110,8 @@ std::tuple<bool,
            typename ShapeGroup<Float, Spectrum>::ScalarPoint2f,
            typename ShapeGroup<Float, Spectrum>::ScalarUInt32,
            typename ShapeGroup<Float, Spectrum>::ScalarUInt32>
-ShapeGroup<Float, Spectrum>::ray_intersect_preliminary_scalar(const ScalarRay3f &ray) const {
+ShapeGroup<Float, Spectrum>::ray_intersect_preliminary_scalar(const ScalarRay3f &ray,
+                                                              uint32_t /*prim_index*/) const {
     auto pi = m_kdtree->template ray_intersect_scalar<false>(ray);
     // The kd-tree repurposes ``instance_index`` to report the index of the
     // hit child shape (see kdtree.h)
@@ -118,7 +119,8 @@ ShapeGroup<Float, Spectrum>::ray_intersect_preliminary_scalar(const ScalarRay3f 
 }
 
 MI_VARIANT
-bool ShapeGroup<Float, Spectrum>::ray_test_scalar(const ScalarRay3f &ray) const {
+bool ShapeGroup<Float, Spectrum>::ray_test_scalar(const ScalarRay3f &ray,
+                                                  uint32_t /*prim_index*/) const {
     return m_kdtree->template ray_intersect_scalar<true>(ray).is_valid();
 }
 #endif

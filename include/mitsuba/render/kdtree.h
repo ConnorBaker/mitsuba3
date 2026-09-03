@@ -2391,7 +2391,7 @@ protected:
                 hit = std::get<0>(
                     mesh->ray_intersect_triangle_scalar(prim_index, ray));
             } else {
-                hit = shape->ray_test_scalar(ray);
+                hit = shape->ray_test_scalar(ray, prim_index);
             }
             pi.valid = hit;
             pi.t = dr::select(hit, ScalarFloat(0), dr::Infinity<ScalarFloat>);
@@ -2401,7 +2401,7 @@ protected:
                     mesh->ray_intersect_triangle_scalar(prim_index, ray);
             } else {
                 std::tie(pi.valid, pi.t, pi.prim_uv, std::ignore, prim_index) =
-                    shape->ray_intersect_preliminary_scalar(ray);
+                    shape->ray_intersect_preliminary_scalar(ray, prim_index);
             }
             pi.prim_index = prim_index;
             pi.shape      = shape;

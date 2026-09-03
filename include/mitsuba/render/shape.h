@@ -581,6 +581,9 @@ public:
      * Args:
      *     ray: The ray to be tested for an intersection
      *
+     *     prim_index: Index of the primitive to be intersected. This index
+     *     is ignored by a shape that contains a single primitive.
+     *
      * Returns:
      *     A tuple containing the following field: ``valid``, ``t``, ``uv``,
      *     ``shape_index``, ``prim_index``. The ``shape_index`` should be only used by the
@@ -588,8 +591,10 @@ public:
      */
     virtual std::tuple<bool, ScalarFloat, ScalarPoint2f,
                        ScalarUInt32, ScalarUInt32>
-    ray_intersect_preliminary_scalar(const ScalarRay3f &ray) const;
-    virtual bool ray_test_scalar(const ScalarRay3f &ray) const;
+    ray_intersect_preliminary_scalar(const ScalarRay3f &ray,
+                                     ScalarIndex prim_index = 0) const;
+    virtual bool ray_test_scalar(const ScalarRay3f &ray,
+                                 ScalarIndex prim_index = 0) const;
 
     /// Macro to declare packet versions of the scalar routine above
     #define MI_DECLARE_RAY_INTERSECT_PACKET(N)                                  \
@@ -1065,11 +1070,13 @@ NAMESPACE_END(mitsuba)
     }                                                                                       \
     using typename Base::ScalarRay3f;                                                       \
     std::tuple<bool, ScalarFloat, ScalarPoint2f, ScalarUInt32, ScalarUInt32>                \
-    ray_intersect_preliminary_scalar(const ScalarRay3f &ray) const override {               \
-        return ray_intersect_preliminary_impl<ScalarFloat>(ray, 0, true);                   \
+    ray_intersect_preliminary_scalar(const ScalarRay3f &ray,                                \
+                                     ScalarIndex prim_index) const override {               \
+        return ray_intersect_preliminary_impl<ScalarFloat>(ray, prim_index, true);          \
     }                                                                                       \
-    ScalarMask ray_test_scalar(const ScalarRay3f &ray) const override {                     \
-        return ray_test_impl<ScalarFloat>(ray, 0, true);                                    \
+    ScalarMask ray_test_scalar(const ScalarRay3f &ray,                                      \
+                               ScalarIndex prim_index) const override {                     \
+        return ray_test_impl<ScalarFloat>(ray, prim_index, true);                           \
     }                                                                                       \
     MI_IMPLEMENT_RAY_INTERSECT_PACKET(4)                                                    \
     MI_IMPLEMENT_RAY_INTERSECT_PACKET(8)                                                    \
