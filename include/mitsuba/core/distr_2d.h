@@ -341,6 +341,18 @@ public:
  * square :math:`[0,1]^2` to a function on :math:`[0,1]^2` that linearly
  * interpolates the input array.
  *
+ * The input array's samples sit at the NODES of a regular grid over the unit
+ * square, not at cell centres: for an array of resolution ``res``, sample
+ * ``(i, j)`` is located at ``(i / (res.x() - 1), j / (res.y() - 1))``. The
+ * FIRST sample therefore lies exactly on the corner :math:`(0, 0)` and the
+ * LAST on :math:`(1, 1)`, and the array spans ``res - 1`` interpolation
+ * patches rather than ``res`` cells. Data that is conceptually PIXEL-CENTRED
+ * (an image, a histogram, a point spread function) differs from this by half
+ * a cell, which matters most where the density is concentrated: e.g. a
+ * radially symmetric pattern whose peak must map to :math:`(0.5, 0.5)`
+ * requires an ODD ``res``, since for even ``res`` the central sample sits at
+ * ``(res / 2) / (res - 1)``, half a cell past the centre.
+ *
  * The mapping is constructed from a sequence of ``log2(max(res))``
  * hierarchical sample warping steps, where ``res`` is the input array
  * resolution. It is bijective and generally very well-behaved (i.e. low
@@ -847,6 +859,18 @@ protected:
  * internal data structures to efficiently map uniform variates from the unit
  * square :math:`[0,1]^2` to a function on :math:`[0,1]^2` that linearly
  * interpolates the input array.
+ *
+ * The input array's samples sit at the NODES of a regular grid over the unit
+ * square, not at cell centres: for an array of resolution ``res``, sample
+ * ``(i, j)`` is located at ``(i / (res.x() - 1), j / (res.y() - 1))``. The
+ * FIRST sample therefore lies exactly on the corner :math:`(0, 0)` and the
+ * LAST on :math:`(1, 1)`, and the array spans ``res - 1`` interpolation
+ * patches rather than ``res`` cells. Data that is conceptually PIXEL-CENTRED
+ * (an image, a histogram, a point spread function) differs from this by half
+ * a cell, which matters most where the density is concentrated: e.g. a
+ * radially symmetric pattern whose peak must map to :math:`(0.5, 0.5)`
+ * requires an ODD ``res``, since for even ``res`` the central sample sits at
+ * ``(res / 2) / (res - 1)``, half a cell past the centre.
  *
  * The mapping is constructed via the inversion method, which is applied to
  * a marginal distribution over rows, followed by a conditional distribution
