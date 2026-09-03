@@ -961,7 +961,13 @@ protected:
 
     uint32_t m_discontinuity_types = (uint32_t) DiscontinuityFlags::Empty;
     /// Sampling weight (proportional to scene)
-    float m_silhouette_sampling_weight;
+    ///
+    /// The in-class initializer matters: the ``Shape()`` default constructor
+    /// (used by the direct ``Mesh(name, ...)`` construction path, which never
+    /// sees a ``Properties``) otherwise leaves this uninitialized, and
+    /// ``Mesh::merge_key()`` compares it -- merging meshes built that way then
+    /// fails on garbage inequality.
+    float m_silhouette_sampling_weight = 1.f;
 
     /// Blender-style per-object ray visibility (see `RayMask`), parsed from
     /// the ``visible_*`` shape properties; `RayMask::All` unless the scene
