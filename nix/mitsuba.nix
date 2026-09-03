@@ -58,6 +58,14 @@
     "cuda_ad_rgb"
     "cuda_ad_spectral"
   ],
+  # EXPERIMENTAL, default OFF (see the MI_ENABLE_EMBREE note at `cmakeFlags`
+  # for why off is the deliberate default). ON builds the vendored
+  # `ext/embree` (internal tasking system, no extra Nix dependency) as the
+  # scalar-variant CPU ray-tracing backend in place of Mitsuba's native
+  # kd-tree. Exposed as the `mitsuba-embree` flake package for measuring the
+  # kd-tree-vs-Embree test-suite delta; flipping the DEFAULT is a decision
+  # for the consuming project, not this file.
+  enableEmbree ? false,
 }:
 
 let
@@ -226,8 +234,9 @@ buildPythonPackage (finalAttrs: {
     # CUDA-only (OptiX supplies the acceleration structure there) and
     # `scalar_rgb` falls back to Mitsuba's own kd-tree, so building Embree's
     # full ISA matrix -- SSE42/AVX/AVX2/AVX512SKX, each a separate compile of
-    # the whole kernel set -- buys nothing here.
-    (lib.cmakeBool "MI_ENABLE_EMBREE" false)
+    # the whole kernel set -- buys nothing here. `enableEmbree` (above) flips
+    # this for the experimental Embree-on measurement build.
+    (lib.cmakeBool "MI_ENABLE_EMBREE" enableEmbree)
     (lib.cmakeBool "MI_ENABLE_PYTHON" true)
     # Bundled deps (ext/zlib among them) declare `cmake_minimum_required`
     # values that CMake >= 4.0 rejects outright. Upstream sets this in
@@ -259,7 +268,8 @@ buildPythonPackage (finalAttrs: {
   #     bring their own libpng/libjpeg/OpenEXR. Unvendoring these removes a
   #     deliberate collision guard, so they stay.
   #   struct-jit / rgb2spec -- mitsuba-renderer's own, not packaged anywhere.
-  #   embree -- not built at all here (MI_ENABLE_EMBREE=false, above).
+  #   embree -- not built by default (MI_ENABLE_EMBREE defaults off via
+  #     `enableEmbree`); when enabled it builds vendored, as upstream does.
   #   zlib -- already unvendored; `ext/zlib` is built only `if (WIN32)`.
   #   nanobind, drjit -- already come from Nix (see the top note).
   #
