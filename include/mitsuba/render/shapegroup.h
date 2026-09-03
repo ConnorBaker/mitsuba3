@@ -24,8 +24,10 @@ public:
 
 #if !defined(MI_ENABLE_EMBREE)
     std::tuple<bool, ScalarFloat, ScalarPoint2f, ScalarUInt32, ScalarUInt32>
-    ray_intersect_preliminary_scalar(const ScalarRay3f &ray) const override;
-    bool ray_test_scalar(const ScalarRay3f &ray) const override;
+    ray_intersect_preliminary_scalar(const ScalarRay3f &ray,
+                                     uint32_t prim_index = 0) const override;
+    bool ray_test_scalar(const ScalarRay3f &ray,
+                         uint32_t prim_index = 0) const override;
 #endif
 
     ScalarSize primitive_count() const override;

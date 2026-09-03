@@ -214,7 +214,8 @@ std::tuple<bool,
            typename Shape<Float, Spectrum>::ScalarPoint2f,
            typename Shape<Float, Spectrum>::ScalarUInt32,
            typename Shape<Float, Spectrum>::ScalarUInt32>
-Shape<Float, Spectrum>::ray_intersect_preliminary_scalar(const ScalarRay3f & /*ray*/) const {
+Shape<Float, Spectrum>::ray_intersect_preliminary_scalar(const ScalarRay3f & /*ray*/,
+                                                         uint32_t /*prim_index*/) const {
     NotImplementedError("ray_intersect_preliminary_scalar");
 }
 
@@ -247,7 +248,8 @@ Shape<Float, Spectrum>::ray_test(const Ray3f &ray, uint32_t prim_index, Mask act
 }
 
 MI_VARIANT
-bool Shape<Float, Spectrum>::ray_test_scalar(const ScalarRay3f & /*ray*/) const {
+bool Shape<Float, Spectrum>::ray_test_scalar(const ScalarRay3f & /*ray*/,
+                                             uint32_t /*prim_index*/) const {
     NotImplementedError("ray_intersect_test_scalar");
 }
 
