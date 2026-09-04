@@ -58,10 +58,34 @@
     "cuda_ad_rgb"
     "cuda_ad_spectral"
   ],
+  # EXPERIMENTAL, default OFF (see the MI_ENABLE_EMBREE note at `cmakeFlags`
+  # for why off is the deliberate default). ON builds the vendored
+  # `ext/embree` (internal tasking system, no extra Nix dependency) as the
+  # scalar-variant CPU ray-tracing backend in place of Mitsuba's native
+  # kd-tree. Exposed as the `mitsuba-embree` flake package for measuring the
+  # kd-tree-vs-Embree test-suite delta; flipping the DEFAULT is a decision
+  # for the consuming project, not this file.
+  enableEmbree ? false,
 }:
 
 let
   src = ../.;
+
+  # CARRY THE VENDORED TREE'S ONE-LINE SERIALIZATION PATCH onto the stock
+  # pugixml this build links. Upstream's `ext/pugixml` is not pristine: in
+  # `node_output_start` it deletes the two lines that write pugixml's
+  # traditional space before an empty element's closing tag ("wenzel: removed
+  # this extra space before the closing tag"), so vendored builds emit `/>`
+  # where stock pugixml emits ` />`. Three upstream tests assert the `/>`
+  # form byte-for-byte (test_parser_writing::test06/test07,
+  # test_field::test01), and every mitsuba-written XML file changes shape
+  # without it -- the patch is behavior, not style, so unvendoring must
+  # preserve it. Scoped HERE rather than in overlay.nix: the overlay
+  # deliberately adds only new attribute names, and this must not leak a
+  # patched pugixml into consumers' unrelated packages.
+  pugixml' = pugixml.overrideAttrs (prevAttrs: {
+    patches = (prevAttrs.patches or [ ]) ++ [ ./pugixml-empty-tag-no-space.patch ];
+  });
 
   # The variant grammar, straight from `resources/mitsuba.conf.template`:
   # backend, then the optional `ad` feature (JIT backends only -- the template
@@ -186,8 +210,9 @@ buildPythonPackage (finalAttrs: {
     # `lib/libpugixml.a`, so the result is a STATIC link -- `libmitsuba.so`
     # grows and no `libpugixml.so` is installed beside it, where the vendored
     # build shipped one. fast-float and tinyformat are header-only and
-    # contribute include paths only.
-    pugixml
+    # contribute include paths only. `pugixml'` (not the stock attr) carries
+    # the vendored tree's serialization patch -- see the note at `pugixml'`.
+    pugixml'
     fast-float
     tinyformat
   ];
@@ -209,8 +234,9 @@ buildPythonPackage (finalAttrs: {
     # CUDA-only (OptiX supplies the acceleration structure there) and
     # `scalar_rgb` falls back to Mitsuba's own kd-tree, so building Embree's
     # full ISA matrix -- SSE42/AVX/AVX2/AVX512SKX, each a separate compile of
-    # the whole kernel set -- buys nothing here.
-    (lib.cmakeBool "MI_ENABLE_EMBREE" false)
+    # the whole kernel set -- buys nothing here. `enableEmbree` (above) flips
+    # this for the experimental Embree-on measurement build.
+    (lib.cmakeBool "MI_ENABLE_EMBREE" enableEmbree)
     (lib.cmakeBool "MI_ENABLE_PYTHON" true)
     # Bundled deps (ext/zlib among them) declare `cmake_minimum_required`
     # values that CMake >= 4.0 rejects outright. Upstream sets this in
@@ -242,7 +268,8 @@ buildPythonPackage (finalAttrs: {
   #     bring their own libpng/libjpeg/OpenEXR. Unvendoring these removes a
   #     deliberate collision guard, so they stay.
   #   struct-jit / rgb2spec -- mitsuba-renderer's own, not packaged anywhere.
-  #   embree -- not built at all here (MI_ENABLE_EMBREE=false, above).
+  #   embree -- not built by default (MI_ENABLE_EMBREE defaults off via
+  #     `enableEmbree`); when enabled it builds vendored, as upstream does.
   #   zlib -- already unvendored; `ext/zlib` is built only `if (WIN32)`.
   #   nanobind, drjit -- already come from Nix (see the top note).
   #
@@ -258,7 +285,7 @@ buildPythonPackage (finalAttrs: {
         target_link_libraries(pugixml_shim INTERFACE pugixml::pugixml)' \
           --replace-fail \
             'set(PUGIXML_INCLUDE_DIRS ''${CMAKE_CURRENT_SOURCE_DIR}/pugixml/src PARENT_SCOPE)' \
-            'set(PUGIXML_INCLUDE_DIRS ${lib.getDev pugixml}/include PARENT_SCOPE)' \
+            'set(PUGIXML_INCLUDE_DIRS ${lib.getDev pugixml'}/include PARENT_SCOPE)' \
           --replace-fail \
             'set(TINYFORMAT_INCLUDE_DIRS ''${CMAKE_CURRENT_SOURCE_DIR}/tinyformat PARENT_SCOPE)' \
             'set(TINYFORMAT_INCLUDE_DIRS ${tinyformat}/include PARENT_SCOPE)' \

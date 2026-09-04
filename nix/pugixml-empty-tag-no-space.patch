@@ -1,0 +1,15 @@
+--- a/src/pugixml.cpp	2026-09-03 02:01:14.437240056 +0000
++++ b/src/pugixml.cpp	2026-09-03 02:01:22.510364934 +0000
+@@ -4235,9 +4235,9 @@
+ 				}
+ 				else
+ 				{
+-					if ((flags & format_raw) == 0)
+-						writer.write(' ');
+-
++					// mitsuba: removed the extra space before the closing tag,
++					// mirroring the patch upstream carries in its vendored
++					// ext/pugixml (node_output_start).
+ 					writer.write('/', '>');
+ 
+ 					return false;
