@@ -23,13 +23,31 @@
 # `ext/drjit/ext/drjit-core/ext/nanothread/ext/cmake-defaults`, whose
 # CMakeLists it includes for the project's compile defaults.
 #
-# THE VARIANT SET IS DELIBERATE AND MINIMAL. `scalar_rgb` is not optional --
-# Mitsuba hard-requires it as the variant its plugin registry and
-# `mitsuba.scalar_rgb` bootstrap path are written against -- so the set is
-# that plus the two CUDA variants the consuming project (the HSR burst-SR
-# work) actually wants. No `llvm_ad_*`, no `scalar_spectral`: every extra
-# variant is a full recompile of the entire plugin tree, which is where this
-# build's wall-clock goes. Override `mitsubaVariants` for a different set.
+# THE VARIANT SET IS DELIBERATE. `scalar_rgb` is not optional -- Mitsuba
+# hard-requires it as the variant its plugin registry and `mitsuba.scalar_rgb`
+# bootstrap path are written against (and a `scalar_rgb`-ONLY set does not even
+# LINK: `jit_free`/`jit_flag` go undefined from the `Mesh.from_corners` port and
+# `SurfaceField::eval_1`, so at least one llvm/cuda variant is mandatory too).
+#
+# The two `_polarized` names were added 2026-09-05 for the consuming project's
+# LENS model, and the reason is not polarization for its own sake: the element
+# trace's own docstring lists `reflections, coatings` as absent-not-approximated,
+# and per-surface Fresnel transmission and an AR stack split into s- and p-
+# components, so they cannot be added correctly on unpolarized transport. The
+# colour axis and the polarization axis are ORTHOGONAL -- spectral buys the
+# wavelength physics (diffraction, dispersion, TCA), polarized buys the interface
+# physics; neither substitutes for the other.
+#
+# `scalar_spectral_polarized` earns its place separately: it is the only CPU
+# spectral variant, and spectral-side verification (e.g. the SRF `pdf_spectrum`
+# probes) otherwise has to occupy the exclusive GPU to run at all.
+#
+# COST, MEASURED rather than assumed -- the previous text here claimed every
+# extra variant is "a full recompile of the entire plugin tree", which
+# over-priced it. Five variants build in ~375 s wall against ~103 s for the
+# three below, i.e. roughly 136 s marginal per POLARIZED variant (~3.4x the
+# ~40 s an unpolarized one costs), farmed to the remote builder. Minutes, not
+# hours. Override `mitsubaVariants` for a different set.
 {
   lib,
   buildPythonPackage,
@@ -57,6 +75,8 @@
     "scalar_rgb"
     "cuda_ad_rgb"
     "cuda_ad_spectral"
+    "scalar_spectral_polarized"
+    "cuda_ad_spectral_polarized"
   ],
   # EXPERIMENTAL, default OFF (see the MI_ENABLE_EMBREE note at `cmakeFlags`
   # for why off is the deliberate default). ON builds the vendored
