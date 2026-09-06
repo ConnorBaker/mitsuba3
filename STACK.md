@@ -188,6 +188,13 @@ evidence above is what the fix has been verified against.
 
 ## Retired branches
 
+**STATE: decided and tagged, refs NOT yet deleted.** The four branch refs below
+still exist in this repository; only the `retired/` tags have been created. Do
+not read this section as a description of `git branch` output until the two
+commands at the end of it have been run. (Recording the gap rather than the
+intent is the whole point of the census above -- a doc that states the plan as
+though it were the state is how ten branches hid behind a four-row table.)
+
 Retired 2026-09-06 because not one of them carries a patch the survivors lack
 (verified by patch-id, per the census above). **Each is tagged before deletion,
 so nothing here is unrecoverable** -- `git checkout retired/<name>` restores the
@@ -205,3 +212,15 @@ tip, and the tag keeps its commits from being garbage-collected.
 the branch ref can be deleted. `git worktree remove` refuses it -- "working
 trees containing submodules cannot be moved or removed" -- so it needs
 `git worktree remove --force`.
+
+To finish the retirement:
+
+```
+git -C ~/Packages/mitsuba3 worktree remove --force ~/Packages/mitsuba3-embree-eval
+git -C ~/Packages/mitsuba3 branch -D parity-snapshot hsr/m2-sample-pos-in-pixel hsr/embree-eval feat/nix
+```
+
+`-D` rather than `-d` is REQUIRED and is not a force-past-danger here: `-d`
+refuses all four as "not fully merged" because it asks the SHA question, which
+is the wrong one for a rebased branch (see the census). The patch-id question
+has already been asked and answered, and the tags make it reversible.
