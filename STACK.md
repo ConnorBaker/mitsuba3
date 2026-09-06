@@ -5,10 +5,35 @@ repo, so a rebase of an upper branch drags every stacked ref below it):
 
 | branch | contents | moves when |
 |---|---|---|
-| `upstream-master` | pinned upstream `origin/master` (3989175f at creation) | we deliberately re-pin |
+| `upstream-master` | pinned upstream `origin/master` (3989175f at creation). **Exists only as `refs/remotes/origin/upstream-master`** -- there is no local branch by this name, so step 1 below moves the REMOTE ref | we deliberately re-pin |
 | `pr/1885` | mitsuba3 PR #1885 head, verbatim (`origin/field`, e004b772) | upstream pushes to the PR |
 | `pr/1885-fixes` | `pr/1885` + a merge of `upstream-master` with conflicts resolved + adaptation commits (nanobind-3 / Dr.Jit-traversal updates ported onto the PR's replacement files) | either parent moves |
-| `hsr/master-port` | our feature work (this branch); split into stacked `hsr/*` topic branches as clusters land | development |
+| `hsr/master-port` | the port work: the P1-P8 clusters, as stacked `hsr/*` topic branches collapse into it | development |
+| `hsr/integration` | **THE CONSUMED BRANCH** -- what the Handheld-Multi-Frame-Super-Resolution flake builds against, and what is normally checked out here. Carries `hsr/master-port` plus the nix packaging | development |
+| `hsr/blender-parity` | the Blender/Cycles parity work (path-space regularization, sampler changes). Tracked in the HSR repo by `blender_render/MITSUBA_COMPARISON_STATUS.md` | development |
+
+## Branch census (measured 2026-09-06)
+
+**Counted by PATCH-ID (`git cherry hsr/integration <branch>`), never by
+`git rev-list --count`.** These branches are rebased, so a SHA count reports
+absorbed work as outstanding: `feat/nix` reads 2 commits ahead by SHA and
+**0** by patch-id, and `hsr/blender-parity` reads 85 against 80. Use
+`git cherry` for any retire/keep decision.
+
+| branch | patches not in `hsr/integration` | note |
+|---|---|---|
+| `hsr/blender-parity` | 80 | the only large independent line |
+| `hsr/master-port` | 12 | tip of the nested port chain |
+| `pr/1885-fixes` | 2 | live: the upstream-tracking layer, NOT dead despite being nearly absorbed |
+| `pr/1885` | 0 | live: strict ancestor of `hsr/integration`; exists to be re-pinned when the PR moves |
+| `master` | 0 | tracks `origin/master` |
+
+The port branches nest strictly, which is what "split into stacked topic
+branches as clusters land" produces when the lower layers are never swept:
+`pr/1885-fixes` (2) is a subset of `hsr/embree-eval` (9), which is a subset of
+`hsr/master-port` (12). **Absorbed is not the same as retirable**: `pr/1885`
+and `pr/1885-fixes` contribute nothing new to `hsr/integration` and are still
+load-bearing, because the refresh procedure below re-pins them.
 
 ## Refresh procedure
 
@@ -40,9 +65,11 @@ COMPILES, including the full P1-P8 feature port (see PORT_LOG.md).
 three default variants (scalar_rgb, cuda_ad_rgb, cuda_ad_spectral) and the
 full fields plugin set, including the ported math plugin. The dependency
 triplet (drjit==1.6.0.dev1 at de73a6a2, nanobind==3.0.0 + nanobind-backend
-1.0.0 at backend-v1.0.0, split mode ON) is packaged IN-REPO on the
-`feat/nix` layer below this branch -- root flake.nix + nix/ -- so the stack
-is self-hosting. One compile fix was needed on top of the read-only
+1.0.0 at backend-v1.0.0, split mode ON) is packaged IN-REPO -- root flake.nix
++ nix/ -- so the stack is self-hosting. That packaging originated on a
+`feat/nix` layer, which is now RETIRED: `hsr/integration` carries six of its
+eight files byte-identical and has moved AHEAD on `flake.nix` and
+`nix/mitsuba.nix`, so the layer was superseded rather than merely merged. One compile fix was needed on top of the read-only
 adaptation: nanobind 3 added a str_hash argument to detail::ticket, which
 the PR's 39 hand-rolled ticket sites in field_v.cpp predate (see the
 `field_v.cpp: pass the str_hash argument` commit).
@@ -158,3 +185,23 @@ With the volprim row fixed, the expected full-suite failure count drops to 35
 (the three remaining rows). Not yet re-measured: the full suite includes the
 cuda variants and the GPU was occupied when 88fd5037 landed; the scalar-only
 evidence above is what the fix has been verified against.
+
+## Retired branches
+
+Retired 2026-09-06 because not one of them carries a patch the survivors lack
+(verified by patch-id, per the census above). **Each is tagged before deletion,
+so nothing here is unrecoverable** -- `git checkout retired/<name>` restores the
+tip, and the tag keeps its commits from being garbage-collected.
+
+| tag | was | why retired |
+|---|---|---|
+| `retired/parity-snapshot` | `parity-snapshot` | an EARLIER state of `hsr/blender-parity`: missing `src/integrators/tests/test_regularization.py` (599 lines) and most of the `path.cpp` work |
+| `retired/hsr-m2-sample-pos-in-pixel` | `hsr/m2-sample-pos-in-pixel` | contributes the IDENTICAL 12 patch-ids as `hsr/master-port`; the two trees differ only by commits already in `hsr/integration` |
+| `retired/hsr-embree-eval` | `hsr/embree-eval` | its 9 patches are a strict subset of `hsr/master-port`'s 12 |
+| `retired/feat-nix` | `feat/nix` | superseded on `hsr/integration` (see Build status) |
+
+`hsr/embree-eval` additionally had a worktree at
+`/home/connorbaker/Packages/mitsuba3-embree-eval`, which must be removed before
+the branch ref can be deleted. `git worktree remove` refuses it -- "working
+trees containing submodules cannot be moved or removed" -- so it needs
+`git worktree remove --force`.
