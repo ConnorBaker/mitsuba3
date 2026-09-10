@@ -27,7 +27,13 @@ class TranslucentBSDF(mi.BSDF):
         active &= mi.Frame3f.cos_theta(si.wi) * mi.Frame3f.cos_theta(wo) >= mi.Float(0.0)
         coso = dr.abs(mi.Frame3f.cos_theta(wo))
         color = self.color.eval(si, active) 
-        return dr.select(active, mi.Color3f(0.0), color * dr.inv_pi * coso)
+        # `mi.UnpolarizedSpectrum`, NOT `mi.Color3f`. MEASURED on mitsuba 3.10.0.dev1 /
+        # drjit 1.6.0.dev1: under `cuda_ad_rgb` the two are the SAME TYPE at width 3, so
+        # this is a strict no-op there; under `cuda_ad_spectral` `Color3f` is width 3
+        # while the value branch (a spectral texture eval) is width 4, and the call dies
+        # with `drjit.select(<drjit.cuda.ad.Bool>): Incompatible arguments.` -- so this
+        # BSDF could not be evaluated at all under any spectral variant.
+        return dr.select(active, mi.UnpolarizedSpectrum(0.0), color * dr.inv_pi * coso)
 
     def pdf(self, ctx, si, wo, active):
         active &= mi.Frame3f.cos_theta(si.wi) * mi.Frame3f.cos_theta(wo) >= mi.Float(0.0)

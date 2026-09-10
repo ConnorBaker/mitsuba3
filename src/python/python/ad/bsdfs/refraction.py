@@ -62,7 +62,15 @@ class RefractionBSDF(mi.BSDF):
 
         bs.pdf = b_pdf * dr.abs(dwh_dwo)
 
-        return bs, dr.select(active, mi.Color3f(weight), mi.Color3f(0.0))
+        # `mi.UnpolarizedSpectrum`, NOT `mi.Color3f` -- see `translucent.py`'s note. This
+        # site fails at a DIFFERENT call from the `dr.select` in `eval` below, and the
+        # difference was measured rather than reasoned: the guess was that two `Color3f`
+        # branches would agree with each other and silently TRUNCATE the width-4 weight,
+        # returning a well-formed wrong answer. They do not. The constructor refuses
+        # first -- `mitsuba.Color3f.__init__(): Input has the wrong size (expected 3
+        # elements, got 4)` -- so this is a loud failure like the other two, and no
+        # silently-wrong render was ever possible here.
+        return bs, dr.select(active, mi.UnpolarizedSpectrum(weight), mi.UnpolarizedSpectrum(0.0))
 
     def eval(self, ctx, si, wo, active):
         a = self.roughness.eval_1(si, active)
@@ -92,7 +100,9 @@ class RefractionBSDF(mi.BSDF):
             (cos_i * dr.square(cos_mi + eta * dr.dot(wo, m)))) 
         value *= self.color.eval(si, active)
 
-        return dr.select(active, value, mi.Color3f(0.0))
+        # `mi.UnpolarizedSpectrum`, NOT `mi.Color3f` -- the raising form, as in
+        # `translucent.py`: `value` is a width-4 spectrum under a spectral variant.
+        return dr.select(active, value, mi.UnpolarizedSpectrum(0.0))
 
     def pdf(self, ctx, si, wo, active):
         cos_i = mi.Frame3f.cos_theta(si.wi)
