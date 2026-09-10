@@ -1,5 +1,8 @@
 from __future__ import annotations  # Delayed parsing of type annotations
 
+import contextlib
+import weakref
+
 import drjit as dr
 import mitsuba as mi
 from ._base import TextureBase
@@ -33,10 +36,26 @@ from .blender_hash import hash_float4_to_float
 # owns it, so the scene is BOUND after `load_dict` -- see `bind_scene` below. Evaluating an
 # unbound instance raises rather than returning 1.0: "everything is unoccluded" is exactly
 # the plausible wrong picture that would never be reported.
+#
+# THE BINDING IS A REFERENCE CYCLE AND NOTHING IN PYTHON CAN BREAK IT, so it has to be
+# released by hand -- prefer the `bound_scene` context manager below to a bare
+# `bind_scene`. The scene owns this texture through C++; `tex.scene = scene` closes the
+# loop back. Both of the usual escapes were tried and MEASURED absent on mitsuba
+# 3.10.0.dev1 / drjit 1.6.0.dev1: `weakref.ref(scene)` raises `TypeError: cannot create
+# weak reference to 'mitsuba.Scene' object`, and `gc.is_tracked(scene)` is FALSE -- a
+# refcount-only object that the cycle collector never even considers. So a bound scene
+# that is merely dropped is retained for the life of the process, with its BVH and its
+# device allocations. (The texture itself IS gc-tracked and IS weakref-able -- measured
+# the same way -- which is why `_BOUND` below can hold weak references and so cannot
+# become the second leak.)
 
 CHANNELS = ('AO', 'Color')
 
 _PENDING = []
+# Weak references to every texture currently holding a scene, so `unbind_scene` can find
+# them. WEAK deliberately: a strong list here would keep the textures alive for the life of
+# the process and simply move the leak one edge along.
+_BOUND = []
 
 
 def bind_scene(scene):
@@ -45,19 +64,69 @@ def bind_scene(scene):
 
     Call this immediately after `mi.load_dict` / `mi.load_file`. The list is cleared, so a
     second scene loaded afterwards binds only its own textures.
+
+    THE BINDING RETAINS THE SCENE UNTIL `unbind_scene` IS CALLED -- see the module comment.
+    Prefer `bound_scene(scene)`, which cannot be forgotten.
     """
     n = 0
     for tex in _PENDING:
         tex.scene = scene
+        _BOUND.append(weakref.ref(tex))
         n += 1
     _PENDING.clear()
     return n
+
+
+def unbind_scene():
+    """Drop the scene back-pointer from every texture `bind_scene` bound, and return how
+    many were cleared.
+
+    An unbound texture raises on eval, which is the designed state: it is the same refusal
+    a never-bound one makes, so a scene released too early fails loudly instead of
+    rendering everything unoccluded.
+
+    THIS IS GLOBAL, NOT PER-SCENE, and that is deliberate rather than an oversight -- it
+    clears every outstanding binding, including one an earlier bare `bind_scene` left
+    behind. Measured: with one scene bound the legacy way and a second inside a
+    `bound_scene` block, `bound_count()` reads 2 inside the block and 0 after it. The
+    alternative -- keying the release on the scene -- would need to hold the scene to
+    compare against, which is the retention this function exists to end.
+    """
+    n = 0
+    for ref in _BOUND:
+        tex = ref()
+        if tex is not None and tex.scene is not None:
+            tex.scene = None
+            n += 1
+    _BOUND.clear()
+    return n
+
+
+@contextlib.contextmanager
+def bound_scene(scene):
+    """`with bound_scene(scene): ...` -- bind on entry, unbind on exit, even on an exception.
+
+    This is the spelling to reach for. A bare `bind_scene` leaves a cycle that neither the
+    garbage collector nor a weak reference can break, so every scene bound and dropped in a
+    loop -- a sweep over arms, a seed ladder -- is retained in full.
+    """
+    count = bind_scene(scene)
+    try:
+        yield count
+    finally:
+        unbind_scene()
 
 
 def pending_count():
     """How many AO textures are waiting for a scene. Non-zero after a render means the
     binding step was skipped, which is otherwise silent until the first eval."""
     return len(_PENDING)
+
+
+def bound_count():
+    """How many textures currently hold a scene. Non-zero after the work is done means a
+    scene is still retained -- the count `unbind_scene` would return."""
+    return sum(1 for ref in _BOUND if (tex := ref()) is not None and tex.scene is not None)
 
 
 class AmbientOcclusion(TextureBase):
