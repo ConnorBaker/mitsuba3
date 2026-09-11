@@ -409,6 +409,18 @@ class ADIntegrator(mi.CppADIntegrator):
                         aovs: Sequence[mi.Float],
                         wavelengths: mi.Spectrum):
         '''Helper function to splat values to a imageblock'''
+        # Reduce the polarized Stokes/Mueller representation to an
+        # UnpolarizedSpectrum BEFORE the film-type branch, matching the C++
+        # ordering in `src/render/integrator.cpp` (`UnpolarizedSpectrum spec_u
+        # = unpolarized_spectrum(ray_weight * spec);` precedes the
+        # `FilmFlags::Special` test). Doing it only in the `else` arm left the
+        # `Special` path handing a polarized `Spectrum` to
+        # `Film::prepare_sample`, whose signature takes an
+        # `UnpolarizedSpectrum` -- a hard `TypeError` at the nanobind boundary
+        # that made every `specfilm` render impossible under a `*_polarized`
+        # variant.
+        if mi.is_polarized:
+            value = mi.unpolarized_spectrum(value)
         if (dr.all(mi.has_flag(film.flags(), mi.FilmFlags.Special))):
             aovs = film.prepare_sample(value, wavelengths,
                                        block.channel_count(),
@@ -417,8 +429,6 @@ class ADIntegrator(mi.CppADIntegrator):
             block.put(pos, aovs)
             del aovs
         else:
-            if mi.is_polarized:
-                value = mi.unpolarized_spectrum(value)
             if mi.is_spectral:
                 rgb = mi.spectrum_to_srgb(value, wavelengths)
             elif mi.is_monochromatic:
