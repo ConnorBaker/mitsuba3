@@ -42,12 +42,36 @@
 # spectral variant, and spectral-side verification (e.g. the SRF `pdf_spectrum`
 # probes) otherwise has to occupy the exclusive GPU to run at all.
 #
+# `llvm_ad_rgb` was added 2026-09-11 for the same reason one level up: the set
+# above had NO CPU AUTODIFF VARIANT AT ALL, so every gradient probe had to
+# queue behind the exclusive card. `scalar_*` cannot stand in -- MEASURED on
+# this box under `scalar_rgb`, `mi.Float is float` is True,
+# `dr.is_diff_v(mi.Float)` is False and `dr.enable_grad` is a silent no-op
+# (`dr.grad_enabled` still False afterwards), which is the WORST failure shape:
+# a differentiable-lens probe runs to completion and reports zero gradients.
+# The grammar above already forbids `scalar_ad_*` (the conf template defines no
+# such name), so an `llvm_ad_*` variant is the ONLY way to get AD off the GPU.
+# `llvm_ad_rgb` is upstream's own default (`CMakeLists.txt` lists it in
+# `MI_DEFAULT_VARIANTS` for every platform) and needs no new Nix dependency:
+# Dr.Jit's LLVM backend is already present in the `drjit` derivation this build
+# links (`dr.has_backend(dr.JitBackend.LLVM)` is 1 with `CUDA_VISIBLE_DEVICES=""`),
+# and `CMakeLists.txt` derives `MI_ENABLE_LLVM`/`MI_ENABLE_JIT` from the variant
+# name itself.
+#
+# `llvm_ad_spectral_polarized` is NOT added here, deliberately. It would be the
+# CPU twin of `cuda_ad_spectral_polarized` and would take the polarized
+# differentiable path off the card entirely -- but it is the expensive class
+# (~136 s marginal, ~3.4x an unpolarized variant) and nothing currently needs
+# AD and polarization and spectral at once on CPU. Add it the moment a probe
+# does; the one-word change is here.
+#
 # COST, MEASURED rather than assumed -- the previous text here claimed every
 # extra variant is "a full recompile of the entire plugin tree", which
-# over-priced it. Five variants build in ~375 s wall against ~103 s for the
-# three below, i.e. roughly 136 s marginal per POLARIZED variant (~3.4x the
-# ~40 s an unpolarized one costs), farmed to the remote builder. Minutes, not
-# hours. Override `mitsubaVariants` for a different set.
+# over-priced it. The five-variant set (this list before `llvm_ad_rgb` was
+# added) built in ~375 s wall against ~103 s for the three unpolarized ones,
+# i.e. roughly 136 s marginal per POLARIZED variant (~3.4x the ~40 s an
+# unpolarized one costs), farmed to the remote builder. Minutes, not hours.
+# Override `mitsubaVariants` for a different set.
 {
   lib,
   buildPythonPackage,
@@ -73,6 +97,7 @@
   stdenv,
   mitsubaVariants ? [
     "scalar_rgb"
+    "llvm_ad_rgb"
     "cuda_ad_rgb"
     "cuda_ad_spectral"
     "scalar_spectral_polarized"
